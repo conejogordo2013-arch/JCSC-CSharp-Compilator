@@ -7,6 +7,7 @@
 
 typedef enum TypeKind {
     TYPE_INT,
+    TYPE_BOOL,
     TYPE_STRING,
     TYPE_VOID,
     TYPE_CLASS,
@@ -20,6 +21,7 @@ typedef struct TypeRef {
 
 typedef enum ExprKind {
     EXPR_INT,
+    EXPR_BOOL,
     EXPR_STRING,
     EXPR_IDENTIFIER,
     EXPR_BINARY,
@@ -43,6 +45,7 @@ struct Expr {
     TypeRef inferred_type;
     union {
         int int_value;
+        bool bool_value;
         const char *string_value;
         const char *identifier;
         struct {
@@ -77,6 +80,8 @@ typedef enum StmtKind {
     STMT_WHILE,
     STMT_FOR,
     STMT_RETURN,
+    STMT_BREAK,
+    STMT_CONTINUE,
 } StmtKind;
 
 typedef struct StmtList {

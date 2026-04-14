@@ -9,6 +9,7 @@ typedef struct Parser {
     Vector *tokens;
     size_t pos;
     DiagnosticList *diags;
+    int loop_depth;
 } Parser;
 
 static Token *peek(Parser *p) { return (Token *)vector_get(p->tokens, p->pos); }
@@ -32,6 +33,7 @@ static void *aalloc(Parser *p, size_t size) {
 static TypeRef parse_type(Parser *p) {
     Token *t = peek(p);
     if (match(p, TOK_KW_INT)) return (TypeRef){.kind = TYPE_INT, .name = "int"};
+    if (match(p, TOK_KW_BOOL)) return (TypeRef){.kind = TYPE_BOOL, .name = "bool"};
     if (match(p, TOK_KW_STRING)) return (TypeRef){.kind = TYPE_STRING, .name = "string"};
     if (match(p, TOK_KW_VOID)) return (TypeRef){.kind = TYPE_VOID, .name = "void"};
     if (match(p, TOK_IDENTIFIER)) return (TypeRef){.kind = TYPE_CLASS, .name = prev(p)->lexeme};
@@ -61,6 +63,16 @@ static Expr *parse_primary(Parser *p) {
     if (match(p, TOK_INT_LITERAL)) {
         Expr *e = new_expr(p, EXPR_INT, prev(p)->span);
         e->as.int_value = atoi(prev(p)->lexeme);
+        return e;
+    }
+    if (match(p, TOK_KW_TRUE)) {
+        Expr *e = new_expr(p, EXPR_BOOL, prev(p)->span);
+        e->as.bool_value = true;
+        return e;
+    }
+    if (match(p, TOK_KW_FALSE)) {
+        Expr *e = new_expr(p, EXPR_BOOL, prev(p)->span);
+        e->as.bool_value = false;
         return e;
     }
     if (match(p, TOK_STRING_LITERAL)) {
@@ -184,7 +196,7 @@ static Stmt *parse_block(Parser *p) {
 }
 
 static bool is_type_start(Parser *p) {
-    return at(p, TOK_KW_INT) || at(p, TOK_KW_STRING) || at(p, TOK_IDENTIFIER);
+    return at(p, TOK_KW_INT) || at(p, TOK_KW_BOOL) || at(p, TOK_KW_STRING) || at(p, TOK_IDENTIFIER);
 }
 
 static Stmt *parse_stmt(Parser *p) {
@@ -208,7 +220,9 @@ static Stmt *parse_stmt(Parser *p) {
         expect(p, TOK_LPAREN, "se esperaba '('");
         Expr *cond = parse_expr(p);
         expect(p, TOK_RPAREN, "se esperaba ')'");
+        p->loop_depth++;
         Stmt *body = parse_stmt(p);
+        p->loop_depth--;
         Stmt *st = new_stmt(p, STMT_WHILE, s);
         st->as.while_stmt.condition = cond;
         st->as.while_stmt.body = body;
@@ -238,7 +252,9 @@ static Stmt *parse_stmt(Parser *p) {
         expect(p, TOK_SEMI, "se esperaba ';'");
         Expr *inc = at(p, TOK_RPAREN) ? NULL : parse_expr(p);
         expect(p, TOK_RPAREN, "se esperaba ')'");
+        p->loop_depth++;
         Stmt *body = parse_stmt(p);
+        p->loop_depth--;
         Stmt *st = new_stmt(p, STMT_FOR, s);
         st->as.for_stmt.initializer = init;
         st->as.for_stmt.condition = cond;
@@ -250,6 +266,18 @@ static Stmt *parse_stmt(Parser *p) {
         Stmt *st = new_stmt(p, STMT_RETURN, prev(p)->span);
         st->as.return_expr = at(p, TOK_SEMI) ? NULL : parse_expr(p);
         expect(p, TOK_SEMI, "se esperaba ';' despues de return");
+        return st;
+    }
+    if (match(p, TOK_KW_BREAK)) {
+        Stmt *st = new_stmt(p, STMT_BREAK, prev(p)->span);
+        if (p->loop_depth == 0) diag_report(p->diags, st->span, "'break' solo puede usarse dentro de un bucle");
+        expect(p, TOK_SEMI, "se esperaba ';' despues de break");
+        return st;
+    }
+    if (match(p, TOK_KW_CONTINUE)) {
+        Stmt *st = new_stmt(p, STMT_CONTINUE, prev(p)->span);
+        if (p->loop_depth == 0) diag_report(p->diags, st->span, "'continue' solo puede usarse dentro de un bucle");
+        expect(p, TOK_SEMI, "se esperaba ';' despues de continue");
         return st;
     }
     if (is_type_start(p)) {
@@ -282,7 +310,7 @@ static Stmt *parse_stmt(Parser *p) {
 }
 
 Program *parse_program(Arena *arena, Vector *tokens, DiagnosticList *diags) {
-    Parser p = {.arena = arena, .tokens = tokens, .pos = 0, .diags = diags};
+    Parser p = {.arena = arena, .tokens = tokens, .pos = 0, .diags = diags, .loop_depth = 0};
     Program *prog = arena_alloc(arena, sizeof(Program));
     memset(prog, 0, sizeof(Program));
     Vector classes; vector_init(&classes, sizeof(ClassDecl));
