@@ -13,6 +13,8 @@ static char *slice_dup(const char *src, int start, int len) {
 
 static TokenKind keyword_kind(const char *lexeme) {
     if (strcmp(lexeme, "class") == 0) return TOK_KW_CLASS;
+    if (strcmp(lexeme, "struct") == 0) return TOK_KW_STRUCT;
+    if (strcmp(lexeme, "interface") == 0) return TOK_KW_INTERFACE;
     if (strcmp(lexeme, "using") == 0) return TOK_KW_USING;
     if (strcmp(lexeme, "namespace") == 0) return TOK_KW_NAMESPACE;
     if (strcmp(lexeme, "public") == 0) return TOK_KW_PUBLIC;
@@ -36,9 +38,15 @@ static TokenKind keyword_kind(const char *lexeme) {
     if (strcmp(lexeme, "break") == 0) return TOK_KW_BREAK;
     if (strcmp(lexeme, "continue") == 0) return TOK_KW_CONTINUE;
     if (strcmp(lexeme, "new") == 0) return TOK_KW_NEW;
+    if (strcmp(lexeme, "async") == 0) return TOK_KW_ASYNC;
+    if (strcmp(lexeme, "await") == 0) return TOK_KW_AWAIT;
     if (strcmp(lexeme, "true") == 0) return TOK_KW_TRUE;
     if (strcmp(lexeme, "false") == 0) return TOK_KW_FALSE;
     if (strcmp(lexeme, "null") == 0) return TOK_KW_NULL;
+    if (strcmp(lexeme, "try") == 0) return TOK_KW_TRY;
+    if (strcmp(lexeme, "catch") == 0) return TOK_KW_CATCH;
+    if (strcmp(lexeme, "finally") == 0) return TOK_KW_FINALLY;
+    if (strcmp(lexeme, "throw") == 0) return TOK_KW_THROW;
     return TOK_IDENTIFIER;
 }
 
@@ -115,10 +123,24 @@ void lex_source(const char *source, Vector *tokens, DiagnosticList *diags) {
             P1(':', TOK_COLON)
             P1(',', TOK_COMMA)
             P1('.', TOK_DOT)
-            P1('+', TOK_PLUS)
-            P1('-', TOK_MINUS)
-            P1('*', TOK_STAR)
-            P1('%', TOK_PERCENT)
+            case '+':
+                if (source[i + 1] == '+') { push_token(tokens, TOK_PLUS_PLUS, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
+                else if (source[i + 1] == '=') { push_token(tokens, TOK_PLUS_ASSIGN, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
+                else { push_token(tokens, TOK_PLUS, slice_dup(source, start, 1), line, start_col, start, 1); i++; col++; }
+                break;
+            case '-':
+                if (source[i + 1] == '-') { push_token(tokens, TOK_MINUS_MINUS, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
+                else if (source[i + 1] == '=') { push_token(tokens, TOK_MINUS_ASSIGN, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
+                else { push_token(tokens, TOK_MINUS, slice_dup(source, start, 1), line, start_col, start, 1); i++; col++; }
+                break;
+            case '*':
+                if (source[i + 1] == '=') { push_token(tokens, TOK_STAR_ASSIGN, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
+                else { push_token(tokens, TOK_STAR, slice_dup(source, start, 1), line, start_col, start, 1); i++; col++; }
+                break;
+            case '%':
+                if (source[i + 1] == '=') { push_token(tokens, TOK_PERCENT_ASSIGN, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
+                else { push_token(tokens, TOK_PERCENT, slice_dup(source, start, 1), line, start_col, start, 1); i++; col++; }
+                break;
             case '!':
                 if (source[i + 1] == '=') { push_token(tokens, TOK_NEQ, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
                 else { push_token(tokens, TOK_NOT, slice_dup(source, start, 1), line, start_col, start, 1); i++; col++; }
@@ -136,7 +158,9 @@ void lex_source(const char *source, Vector *tokens, DiagnosticList *diags) {
                 else { push_token(tokens, TOK_GT, slice_dup(source, start, 1), line, start_col, start, 1); i++; col++; }
                 break;
             case '/':
-                push_token(tokens, TOK_SLASH, slice_dup(source, start, 1), line, start_col, start, 1); i++; col++; break;
+                if (source[i + 1] == '=') { push_token(tokens, TOK_SLASH_ASSIGN, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
+                else { push_token(tokens, TOK_SLASH, slice_dup(source, start, 1), line, start_col, start, 1); i++; col++; }
+                break;
             case '&':
                 if (source[i + 1] == '&') { push_token(tokens, TOK_AND, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
                 else diag_report(diags, (Span){.line = line, .column = col}, "se esperaba '&' para operador &&");
@@ -144,6 +168,14 @@ void lex_source(const char *source, Vector *tokens, DiagnosticList *diags) {
             case '|':
                 if (source[i + 1] == '|') { push_token(tokens, TOK_OR, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
                 else diag_report(diags, (Span){.line = line, .column = col}, "se esperaba '|' para operador ||");
+                break;
+            case '?':
+                if (source[i + 1] == '?') { push_token(tokens, TOK_COALESCE, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
+                else {
+                    push_token(tokens, TOK_QUESTION, slice_dup(source, start, 1), line, start_col, start, 1);
+                    i++;
+                    col++;
+                }
                 break;
             default:
                 diag_report(diags, (Span){.line = line, .column = col}, "caracter no reconocido: '%c'", c);

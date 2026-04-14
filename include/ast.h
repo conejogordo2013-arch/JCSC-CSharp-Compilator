@@ -33,11 +33,13 @@ typedef enum ExprKind {
     EXPR_ASSIGN,
     EXPR_NEW,
     EXPR_INDEX,
+    EXPR_CONDITIONAL,
 } ExprKind;
 
 typedef struct Expr Expr;
 typedef struct Stmt Stmt;
 typedef struct SwitchCase SwitchCase;
+typedef struct CatchClause CatchClause;
 
 typedef struct ExprList {
     Expr **items;
@@ -83,6 +85,11 @@ struct Expr {
             Expr *array;
             Expr *index;
         } index;
+        struct {
+            Expr *condition;
+            Expr *when_true;
+            Expr *when_false;
+        } conditional;
     } as;
 };
 
@@ -99,6 +106,8 @@ typedef enum StmtKind {
     STMT_RETURN,
     STMT_BREAK,
     STMT_CONTINUE,
+    STMT_TRY_CATCH,
+    STMT_THROW,
 } StmtKind;
 
 typedef struct StmtList {
@@ -149,7 +158,20 @@ struct Stmt {
             Stmt *default_body;
         } switch_stmt;
         Expr *return_expr;
+        struct {
+            Stmt *try_block;
+            CatchClause *catches;
+            size_t catch_count;
+            Stmt *finally_block;
+        } try_catch_stmt;
+        Expr *throw_expr;
     } as;
+};
+
+struct CatchClause {
+    TypeRef catch_type;
+    const char *catch_name;
+    Stmt *catch_block;
 };
 
 struct SwitchCase {
@@ -170,6 +192,7 @@ typedef struct MethodDecl {
     size_t param_count;
     Stmt *body;
     bool is_static;
+    bool is_async;
     Span span;
 } MethodDecl;
 
@@ -181,6 +204,7 @@ typedef struct FieldDecl {
 
 typedef struct ClassDecl {
     const char *name;
+    bool is_struct;
     MethodDecl *methods;
     size_t method_count;
     FieldDecl *fields;
