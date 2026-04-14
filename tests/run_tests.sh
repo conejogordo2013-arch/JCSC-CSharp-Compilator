@@ -71,6 +71,70 @@ run_fail() {
   fi
 }
 
+run_native_target() {
+  local target="$1"
+  local src="tests/cases/pass/string_print.cs"
+  local out_asm="$TMP_DIR/native_${target}.s"
+  local log="$TMP_DIR/native_${target}.log"
+  if ! "$JCCSC" "$src" -o "$out_asm" --backend native --target "$target" --emit-asm >"$log" 2>&1; then
+    echo "[FAIL] native_target_$target (deberia generar asm)"
+    cat "$log"
+    fail_count=$((fail_count + 1))
+    return
+  fi
+  if grep -Fq "_start" "$out_asm"; then
+    echo "[PASS] native_target_$target"
+    pass_count=$((pass_count + 1))
+  else
+    echo "[FAIL] native_target_$target (asm sin _start)"
+    cat "$out_asm"
+    fail_count=$((fail_count + 1))
+  fi
+}
+
+run_native_fail_run_flag() {
+  local src="tests/cases/pass/string_print.cs"
+  local out_asm="$TMP_DIR/native_run_fail.s"
+  local log="$TMP_DIR/native_run_fail.log"
+  if "$JCCSC" "$src" -o "$out_asm" --backend native --target x86_64 --run >"$log" 2>&1; then
+    echo "[FAIL] native_run_flag (deberia fallar)"
+    fail_count=$((fail_count + 1))
+    return
+  fi
+  if grep -Fq -- "--run no esta soportado en backend native" "$log"; then
+    echo "[PASS] native_run_flag"
+    pass_count=$((pass_count + 1))
+  else
+    echo "[FAIL] native_run_flag (diagnostico inesperado)"
+    cat "$log"
+    fail_count=$((fail_count + 1))
+  fi
+}
+
+run_native_host_executable() {
+  local src="tests/cases/pass/arith_precedence.cs"
+  local out_exe="$TMP_DIR/native_host_exec"
+  local log="$TMP_DIR/native_host_exec.log"
+  if ! "$JCCSC" "$src" -o "$out_exe" --backend native >"$log" 2>&1; then
+    echo "[FAIL] native_host_executable (deberia generar ejecutable)"
+    cat "$log"
+    fail_count=$((fail_count + 1))
+    return
+  fi
+  if [[ ! -x "$out_exe" ]]; then
+    echo "[FAIL] native_host_executable (archivo no ejecutable)"
+    fail_count=$((fail_count + 1))
+    return
+  fi
+  if "$out_exe" >/dev/null 2>&1; then
+    echo "[PASS] native_host_executable"
+    pass_count=$((pass_count + 1))
+  else
+    echo "[FAIL] native_host_executable (ejecucion fallida)"
+    fail_count=$((fail_count + 1))
+  fi
+}
+
 # PASS CASES (14)
 run_pass "arith_precedence" "7"
 run_pass "if_else" $'111\n222'
@@ -86,6 +150,19 @@ run_pass "comparisons" $'true\ntrue\ntrue\ntrue\ntrue\ntrue'
 run_pass "unary_ops" $'-5\ntrue'
 run_pass "for_without_condition" $'0\n1\n2'
 run_pass "bool_param_return" "true"
+run_pass "oop_instance" "2"
+run_pass "namespace_using" "321"
+run_pass "do_while" $'0\n1\n2'
+run_pass "switch_basic" "22"
+run_pass "arrays_basic" "12"
+
+# NATIVE BACKEND TARGET CASES (4)
+run_native_target "x86_64"
+run_native_target "x86_32"
+run_native_target "arm64"
+run_native_target "arm32"
+run_native_fail_run_flag
+run_native_host_executable
 
 # FAIL CASES (10)
 run_fail "undefined_symbol" "simbolo no definido"

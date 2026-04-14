@@ -7,6 +7,8 @@ const char *token_kind_name(TokenKind kind) {
         case TOK_INT_LITERAL: return "int_literal";
         case TOK_STRING_LITERAL: return "string_literal";
         case TOK_KW_CLASS: return "class";
+        case TOK_KW_USING: return "using";
+        case TOK_KW_NAMESPACE: return "namespace";
         case TOK_KW_PUBLIC: return "public";
         case TOK_KW_PRIVATE: return "private";
         case TOK_KW_STATIC: return "static";
@@ -19,11 +21,18 @@ const char *token_kind_name(TokenKind kind) {
         case TOK_KW_ELSE: return "else";
         case TOK_KW_FOR: return "for";
         case TOK_KW_WHILE: return "while";
+        case TOK_KW_DO: return "do";
+        case TOK_KW_SWITCH: return "switch";
+        case TOK_KW_CASE: return "case";
+        case TOK_KW_DEFAULT: return "default";
         case TOK_KW_BREAK: return "break";
         case TOK_KW_CONTINUE: return "continue";
         case TOK_KW_NEW: return "new";
         case TOK_KW_TRUE: return "true";
         case TOK_KW_FALSE: return "false";
+        case TOK_LBRACKET: return "[";
+        case TOK_RBRACKET: return "]";
+        case TOK_COLON: return ":";
         default: return "symbol";
     }
 }

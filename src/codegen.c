@@ -8,6 +8,8 @@ typedef enum RuntimeValueKind {
     RV_INT,
     RV_BOOL,
     RV_STRING,
+    RV_OBJECT,
+    RV_ARRAY,
     RV_VOID,
 } RuntimeValueKind;
 
@@ -15,6 +17,8 @@ typedef struct RuntimeValue {
     RuntimeValueKind kind;
     int int_value;
     const char *string_value;
+    struct ObjectInstance *object_value;
+    struct ArrayInstance *array_value;
 } RuntimeValue;
 
 typedef struct VarSlot {
@@ -28,6 +32,22 @@ typedef struct Frame {
     struct Frame *parent;
 } Frame;
 
+typedef struct ObjectField {
+    const char *name;
+    RuntimeValue value;
+} ObjectField;
+
+typedef struct ObjectInstance {
+    const char *class_name;
+    ObjectField fields[256];
+    size_t field_count;
+} ObjectInstance;
+
+typedef struct ArrayInstance {
+    int *items;
+    int length;
+} ArrayInstance;
+
 typedef struct ExecContext {
     Program *program;
     DiagnosticList *diags;
@@ -36,6 +56,7 @@ typedef struct ExecContext {
     int did_continue;
     RuntimeValue return_value;
     const char *current_class;
+    ObjectInstance *current_this;
 } ExecContext;
 
 static void frame_init(Frame *f, Frame *parent) { f->count = 0; f->parent = parent; }
@@ -44,6 +65,16 @@ static RuntimeValue rv_int(int v) { return (RuntimeValue){.kind = RV_INT, .int_v
 static RuntimeValue rv_bool(int v) { return (RuntimeValue){.kind = RV_BOOL, .int_value = v ? 1 : 0}; }
 static RuntimeValue rv_string(const char *s) { return (RuntimeValue){.kind = RV_STRING, .string_value = s}; }
 static RuntimeValue rv_void(void) { return (RuntimeValue){.kind = RV_VOID}; }
+static RuntimeValue rv_object(ObjectInstance *obj) { return (RuntimeValue){.kind = RV_OBJECT, .object_value = obj, .int_value = 0}; }
+static RuntimeValue rv_array(ArrayInstance *arr) { return (RuntimeValue){.kind = RV_ARRAY, .array_value = arr}; }
+
+static ObjectField *object_find_field(ObjectInstance *obj, const char *name) {
+    if (!obj) return NULL;
+    for (size_t i = 0; i < obj->field_count; ++i) {
+        if (strcmp(obj->fields[i].name, name) == 0) return &obj->fields[i];
+    }
+    return NULL;
+}
 
 static VarSlot *frame_find(Frame *f, const char *name) {
     for (Frame *it = f; it; it = it->parent) {
@@ -90,12 +121,33 @@ static MethodDecl *find_method(ExecContext *ctx, const char *class_name, const c
     return NULL;
 }
 
+static ClassDecl *find_class(ExecContext *ctx, const char *class_name) {
+    for (size_t ci = 0; ci < ctx->program->class_count; ++ci) {
+        ClassDecl *c = &ctx->program->classes[ci];
+        if (strcmp(c->name, class_name) == 0) return c;
+    }
+    return NULL;
+}
+
+static ObjectInstance *create_object(ExecContext *ctx, const char *class_name) {
+    ClassDecl *c = find_class(ctx, class_name);
+    if (!c) return NULL;
+    ObjectInstance *obj = calloc(1, sizeof(ObjectInstance));
+    obj->class_name = class_name;
+    for (size_t i = 0; i < c->field_count && i < 256; ++i) {
+        obj->fields[obj->field_count++] = (ObjectField){.name = c->fields[i].name, .value = rv_int(0)};
+    }
+    return obj;
+}
+
 static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e);
 static void exec_stmt(ExecContext *ctx, Frame *frame, Stmt *s);
 
 static int truthy(RuntimeValue v) {
     if (v.kind == RV_INT) return v.int_value != 0;
     if (v.kind == RV_BOOL) return v.int_value != 0;
+    if (v.kind == RV_OBJECT) return v.object_value != NULL;
+    if (v.kind == RV_ARRAY) return v.array_value != NULL;
     if (v.kind == RV_STRING) return v.string_value && v.string_value[0] != '\0';
     return 0;
 }
@@ -121,11 +173,18 @@ static RuntimeValue eval_binary(TokenKind op, RuntimeValue a, RuntimeValue b) {
     }
 }
 
-static RuntimeValue call_method(ExecContext *ctx, const char *class_name, const char *method_name, ExprList args, Frame *caller) {
+static RuntimeValue call_method(ExecContext *ctx,
+                                const char *class_name,
+                                const char *method_name,
+                                ExprList args,
+                                Frame *caller,
+                                ObjectInstance *this_obj) {
     if (strcmp(class_name, "Console") == 0 && strcmp(method_name, "WriteLine") == 0 && args.count == 1) {
         RuntimeValue v = eval_expr(ctx, caller, args.items[0]);
         if (v.kind == RV_STRING) printf("%s\n", v.string_value ? v.string_value : "");
         else if (v.kind == RV_BOOL) printf("%s\n", v.int_value ? "true" : "false");
+        else if (v.kind == RV_OBJECT) printf("<object %s>\n", v.object_value ? v.object_value->class_name : "null");
+        else if (v.kind == RV_ARRAY) printf("<array len=%d>\n", v.array_value ? v.array_value->length : 0);
         else printf("%d\n", v.int_value);
         return rv_void();
     }
@@ -152,7 +211,9 @@ static RuntimeValue call_method(ExecContext *ctx, const char *class_name, const 
     ctx->did_continue = 0;
     ctx->return_value = rv_void();
     const char *prev_class = ctx->current_class;
+    ObjectInstance *prev_this = ctx->current_this;
     ctx->current_class = class_name;
+    ctx->current_this = this_obj;
 
     exec_stmt(ctx, &local, m->body);
 
@@ -164,6 +225,7 @@ static RuntimeValue call_method(ExecContext *ctx, const char *class_name, const 
     ctx->did_continue = prev_continue;
     ctx->return_value = prev_value;
     ctx->current_class = prev_class;
+    ctx->current_this = prev_this;
     return out;
 }
 
@@ -174,13 +236,36 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
         case EXPR_STRING: return rv_string(e->as.string_value);
         case EXPR_IDENTIFIER: {
             VarSlot *slot = frame_find(frame, e->as.identifier);
-            if (!slot) return rv_int(0);
-            return slot->value;
+            if (slot) return slot->value;
+            ObjectField *field = object_find_field(ctx->current_this, e->as.identifier);
+            if (field) return field->value;
+            return rv_int(0);
         }
         case EXPR_ASSIGN: {
-            if (e->as.assign.target->kind != EXPR_IDENTIFIER) return rv_void();
             RuntimeValue v = eval_expr(ctx, frame, e->as.assign.value);
-            frame_assign(frame, e->as.assign.target->as.identifier, v);
+            if (e->as.assign.target->kind == EXPR_IDENTIFIER) {
+                VarSlot *slot = frame_find(frame, e->as.assign.target->as.identifier);
+                if (slot) frame_assign(frame, e->as.assign.target->as.identifier, v);
+                else {
+                    ObjectField *field = object_find_field(ctx->current_this, e->as.assign.target->as.identifier);
+                    if (field) field->value = v;
+                    else frame_assign(frame, e->as.assign.target->as.identifier, v);
+                }
+            } else if (e->as.assign.target->kind == EXPR_MEMBER) {
+                RuntimeValue obj = eval_expr(ctx, frame, e->as.assign.target->as.member.object);
+                if (obj.object_value) {
+                    ObjectField *field = object_find_field(obj.object_value, e->as.assign.target->as.member.member);
+                    if (field) field->value = v;
+                }
+            } else if (e->as.assign.target->kind == EXPR_INDEX) {
+                RuntimeValue arr = eval_expr(ctx, frame, e->as.assign.target->as.index.array);
+                RuntimeValue idx = eval_expr(ctx, frame, e->as.assign.target->as.index.index);
+                if (arr.kind == RV_ARRAY && arr.array_value && idx.kind == RV_INT) {
+                    if (idx.int_value >= 0 && idx.int_value < arr.array_value->length) {
+                        arr.array_value->items[idx.int_value] = v.int_value;
+                    }
+                }
+            } else return rv_void();
             return v;
         }
         case EXPR_UNARY: {
@@ -195,20 +280,70 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
             return eval_binary(e->as.binary.op, l, r);
         }
         case EXPR_MEMBER:
-            return rv_void();
+            if (e->as.member.object->kind == EXPR_IDENTIFIER &&
+                strcmp(e->as.member.object->as.identifier, "this") == 0) {
+                ObjectField *field = object_find_field(ctx->current_this, e->as.member.member);
+                return field ? field->value : rv_void();
+            }
+            {
+                RuntimeValue obj = eval_expr(ctx, frame, e->as.member.object);
+                if (obj.object_value) {
+                    ObjectField *field = object_find_field(obj.object_value, e->as.member.member);
+                    if (field) return field->value;
+                }
+                return rv_void();
+            }
         case EXPR_CALL: {
             Expr *callee = e->as.call.callee;
-            if (callee->kind == EXPR_MEMBER && callee->as.member.object->kind == EXPR_IDENTIFIER) {
-                return call_method(ctx,
-                                   callee->as.member.object->as.identifier,
-                                   callee->as.member.member,
-                                   e->as.call.args,
-                                   frame);
+            if (callee->kind == EXPR_MEMBER) {
+                RuntimeValue obj = eval_expr(ctx, frame, callee->as.member.object);
+                if (obj.object_value) {
+                    return call_method(ctx,
+                                       obj.object_value->class_name,
+                                       callee->as.member.member,
+                                       e->as.call.args,
+                                       frame,
+                                       obj.object_value);
+                }
+                if (callee->as.member.object->kind == EXPR_IDENTIFIER) {
+                    return call_method(ctx,
+                                       callee->as.member.object->as.identifier,
+                                       callee->as.member.member,
+                                       e->as.call.args,
+                                       frame,
+                                       NULL);
+                }
             }
             if (callee->kind == EXPR_IDENTIFIER) {
-                return call_method(ctx, ctx->current_class, callee->as.identifier, e->as.call.args, frame);
+                return call_method(ctx, ctx->current_class, callee->as.identifier, e->as.call.args, frame, ctx->current_this);
             }
             return rv_void();
+        }
+        case EXPR_NEW: {
+            if (e->as.new_expr.is_int_array) {
+                RuntimeValue n = eval_expr(ctx, frame, e->as.new_expr.array_size_expr);
+                int len = n.kind == RV_INT ? n.int_value : 0;
+                if (len < 0) len = 0;
+                ArrayInstance *arr = calloc(1, sizeof(ArrayInstance));
+                arr->length = len;
+                arr->items = calloc((size_t)len, sizeof(int));
+                return rv_array(arr);
+            }
+            ObjectInstance *obj = create_object(ctx, e->as.new_expr.class_name);
+            if (!obj) {
+                diag_report(ctx->diags, e->span, "clase no encontrada para new: %s", e->as.new_expr.class_name);
+                return rv_void();
+            }
+            return rv_object(obj);
+        }
+        case EXPR_INDEX: {
+            RuntimeValue arr = eval_expr(ctx, frame, e->as.index.array);
+            RuntimeValue idx = eval_expr(ctx, frame, e->as.index.index);
+            if (arr.kind == RV_ARRAY && arr.array_value && idx.kind == RV_INT &&
+                idx.int_value >= 0 && idx.int_value < arr.array_value->length) {
+                return rv_int(arr.array_value->items[idx.int_value]);
+            }
+            return rv_int(0);
         }
     }
     return rv_void();
@@ -254,6 +389,17 @@ static void exec_stmt(ExecContext *ctx, Frame *frame, Stmt *s) {
                 }
             }
             break;
+        case STMT_DO_WHILE:
+            do {
+                exec_stmt(ctx, frame, s->as.do_while_stmt.body);
+                if (ctx->did_break) {
+                    ctx->did_break = 0;
+                    break;
+                }
+                if (ctx->did_continue) ctx->did_continue = 0;
+                if (ctx->did_return) break;
+            } while (truthy(eval_expr(ctx, frame, s->as.do_while_stmt.condition)));
+            break;
         case STMT_FOR: {
             Frame loop;
             frame_init(&loop, frame);
@@ -275,6 +421,20 @@ static void exec_stmt(ExecContext *ctx, Frame *frame, Stmt *s) {
                     continue;
                 }
             }
+            break;
+        }
+        case STMT_SWITCH: {
+            RuntimeValue v = eval_expr(ctx, frame, s->as.switch_stmt.expr);
+            int matched = 0;
+            for (size_t i = 0; i < s->as.switch_stmt.case_count; ++i) {
+                if (v.int_value == s->as.switch_stmt.cases[i].value) {
+                    exec_stmt(ctx, frame, s->as.switch_stmt.cases[i].body);
+                    matched = 1;
+                    break;
+                }
+            }
+            if (!matched && s->as.switch_stmt.default_body) exec_stmt(ctx, frame, s->as.switch_stmt.default_body);
+            if (ctx->did_break) ctx->did_break = 0;
             break;
         }
         case STMT_RETURN:
@@ -309,6 +469,65 @@ static bool emit_jccsc_binary(Program *program, const char *path, DiagnosticList
     return true;
 }
 
+static bool emit_native_stub(TargetArch target, const char *path, DiagnosticList *diags) {
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        diag_report(diags, (Span){0}, "no se pudo escribir salida nativa: %s", path);
+        return false;
+    }
+
+    switch (target) {
+        case TARGET_ARCH_X86_64:
+            fputs(".text\n.global _start\n_start:\n  mov $60, %rax\n  xor %rdi, %rdi\n  syscall\n", f);
+            break;
+        case TARGET_ARCH_X86_32:
+            fputs(".text\n.global _start\n_start:\n  mov $1, %eax\n  xor %ebx, %ebx\n  int $0x80\n", f);
+            break;
+        case TARGET_ARCH_ARM64:
+            fputs(".text\n.global _start\n_start:\n  mov x8, #93\n  mov x0, #0\n  svc #0\n", f);
+            break;
+        case TARGET_ARCH_ARM32:
+            fputs(".text\n.global _start\n_start:\n  mov r7, #1\n  mov r0, #0\n  svc #0\n", f);
+            break;
+    }
+    fclose(f);
+    return true;
+}
+
+static TargetArch host_target(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    return TARGET_ARCH_X86_64;
+#elif defined(__i386__) || defined(_M_IX86)
+    return TARGET_ARCH_X86_32;
+#elif defined(__aarch64__)
+    return TARGET_ARCH_ARM64;
+#elif defined(__arm__) || defined(_M_ARM)
+    return TARGET_ARCH_ARM32;
+#else
+    return TARGET_ARCH_X86_64;
+#endif
+}
+
+static bool build_native_executable(TargetArch target, const char *exe_path, DiagnosticList *diags) {
+    if (target != host_target()) {
+        diag_report(diags, (Span){0}, "cross-target nativo no disponible en este host. usa --emit-asm");
+        return false;
+    }
+
+    char asm_path[512];
+    snprintf(asm_path, sizeof(asm_path), "%s.s", exe_path);
+    if (!emit_native_stub(target, asm_path, diags)) return false;
+
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "cc -nostdlib -Wl,-e,_start '%s' -o '%s'", asm_path, exe_path);
+    int rc = system(cmd);
+    if (rc != 0) {
+        diag_report(diags, (Span){0}, "fallo al enlazar binario nativo con comando: %s", cmd);
+        return false;
+    }
+    return true;
+}
+
 static bool run_program(Program *program, DiagnosticList *diags) {
     ExecContext ctx = {
         .program = program,
@@ -317,20 +536,32 @@ static bool run_program(Program *program, DiagnosticList *diags) {
         .did_break = 0,
         .did_continue = 0,
         .return_value = rv_void(),
-        .current_class = "Program"
+        .current_class = "Program",
+        .current_this = NULL
     };
     MethodDecl *entry = find_method(&ctx, "Program", "Main");
     if (!entry) {
         diag_report(diags, (Span){0}, "no se encontro Program.Main() como punto de entrada");
         return false;
     }
-    call_method(&ctx, "Program", "Main", (ExprList){0}, NULL);
+    call_method(&ctx, "Program", "Main", (ExprList){0}, NULL, NULL);
     return true;
 }
 
 bool codegen_compile_and_run(Program *program,
                              const CodegenOptions *options,
                              DiagnosticList *diags) {
+    if (options->backend == CODEGEN_BACKEND_NATIVE) {
+        if (options->run_after_compile) {
+            diag_report(diags, (Span){0}, "--run no esta soportado en backend native");
+            return false;
+        }
+        if (options->native_emit_asm_only) {
+            return emit_native_stub(options->target, options->output_path, diags);
+        }
+        return build_native_executable(options->target, options->output_path, diags);
+    }
+
     if (!emit_jccsc_binary(program, options->output_path, diags)) return false;
     if (options->run_after_compile) {
         if (!run_program(program, diags)) return false;

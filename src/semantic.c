@@ -36,11 +36,11 @@ static int is_truthy_compatible(TypeRef t) {
     return t.kind == TYPE_BOOL || t.kind == TYPE_INT || t.kind == TYPE_UNKNOWN;
 }
 
-static void analyze_stmt(Stmt *s, Scope *scope, TypeRef ret_type, DiagnosticList *diags, int loop_depth) {
+static void analyze_stmt(Stmt *s, Scope *scope, TypeRef ret_type, DiagnosticList *diags, int loop_depth, int switch_depth) {
     switch (s->kind) {
         case STMT_BLOCK: {
             Scope child; scope_init(&child, scope);
-            for (size_t i = 0; i < s->as.block.count; ++i) analyze_stmt(s->as.block.items[i], &child, ret_type, diags, loop_depth);
+            for (size_t i = 0; i < s->as.block.count; ++i) analyze_stmt(s->as.block.items[i], &child, ret_type, diags, loop_depth, switch_depth);
             break;
         }
         case STMT_VAR: {
@@ -60,25 +60,40 @@ static void analyze_stmt(Stmt *s, Scope *scope, TypeRef ret_type, DiagnosticList
             if (!is_truthy_compatible(analyze_expr(s->as.if_stmt.condition, scope, diags))) {
                 diag_report(diags, s->span, "la condicion de if debe ser bool/int");
             }
-            analyze_stmt(s->as.if_stmt.then_branch, scope, ret_type, diags, loop_depth);
-            if (s->as.if_stmt.else_branch) analyze_stmt(s->as.if_stmt.else_branch, scope, ret_type, diags, loop_depth);
+            analyze_stmt(s->as.if_stmt.then_branch, scope, ret_type, diags, loop_depth, switch_depth);
+            if (s->as.if_stmt.else_branch) analyze_stmt(s->as.if_stmt.else_branch, scope, ret_type, diags, loop_depth, switch_depth);
             break;
         case STMT_WHILE:
             if (!is_truthy_compatible(analyze_expr(s->as.while_stmt.condition, scope, diags))) {
                 diag_report(diags, s->span, "la condicion de while debe ser bool/int");
             }
-            analyze_stmt(s->as.while_stmt.body, scope, ret_type, diags, loop_depth + 1);
+            analyze_stmt(s->as.while_stmt.body, scope, ret_type, diags, loop_depth + 1, switch_depth);
+            break;
+        case STMT_DO_WHILE:
+            analyze_stmt(s->as.do_while_stmt.body, scope, ret_type, diags, loop_depth + 1, switch_depth);
+            if (!is_truthy_compatible(analyze_expr(s->as.do_while_stmt.condition, scope, diags))) {
+                diag_report(diags, s->span, "la condicion de do-while debe ser bool/int");
+            }
             break;
         case STMT_FOR: {
             Scope child; scope_init(&child, scope);
-            if (s->as.for_stmt.initializer) analyze_stmt(s->as.for_stmt.initializer, &child, ret_type, diags, loop_depth + 1);
+            if (s->as.for_stmt.initializer) analyze_stmt(s->as.for_stmt.initializer, &child, ret_type, diags, loop_depth + 1, switch_depth);
             if (s->as.for_stmt.condition && !is_truthy_compatible(analyze_expr(s->as.for_stmt.condition, &child, diags))) {
                 diag_report(diags, s->span, "la condicion de for debe ser bool/int");
             }
             if (s->as.for_stmt.increment) analyze_expr(s->as.for_stmt.increment, &child, diags);
-            analyze_stmt(s->as.for_stmt.body, &child, ret_type, diags, loop_depth + 1);
+            analyze_stmt(s->as.for_stmt.body, &child, ret_type, diags, loop_depth + 1, switch_depth);
             break;
         }
+        case STMT_SWITCH:
+            analyze_expr(s->as.switch_stmt.expr, scope, diags);
+            for (size_t i = 0; i < s->as.switch_stmt.case_count; ++i) {
+                analyze_stmt(s->as.switch_stmt.cases[i].body, scope, ret_type, diags, loop_depth, switch_depth + 1);
+            }
+            if (s->as.switch_stmt.default_body) {
+                analyze_stmt(s->as.switch_stmt.default_body, scope, ret_type, diags, loop_depth, switch_depth + 1);
+            }
+            break;
         case STMT_RETURN: {
             TypeRef found = s->as.return_expr ? analyze_expr(s->as.return_expr, scope, diags) : (TypeRef){.kind = TYPE_VOID, .name = "void"};
             if (ret_type.kind != TYPE_UNKNOWN && ret_type.kind != found.kind) {
@@ -88,7 +103,11 @@ static void analyze_stmt(Stmt *s, Scope *scope, TypeRef ret_type, DiagnosticList
         }
         case STMT_BREAK:
         case STMT_CONTINUE:
-            if (loop_depth == 0) diag_report(diags, s->span, "'break/continue' fuera de bucle");
+            if (s->kind == STMT_BREAK) {
+                if (loop_depth == 0 && switch_depth == 0) diag_report(diags, s->span, "'break' fuera de bucle/switch");
+            } else if (loop_depth == 0) {
+                diag_report(diags, s->span, "'continue' fuera de bucle");
+            }
             break;
     }
 }
@@ -138,6 +157,16 @@ static TypeRef analyze_expr(Expr *e, Scope *scope, DiagnosticList *diags) {
         case EXPR_CALL:
             for (size_t i = 0; i < e->as.call.args.count; ++i) analyze_expr(e->as.call.args.items[i], scope, diags);
             return (e->inferred_type = (TypeRef){.kind = TYPE_UNKNOWN, .name = "unknown"});
+        case EXPR_NEW:
+            return (e->inferred_type = (TypeRef){.kind = TYPE_CLASS, .name = e->as.new_expr.class_name});
+        case EXPR_INDEX: {
+            analyze_expr(e->as.index.array, scope, diags);
+            TypeRef idx = analyze_expr(e->as.index.index, scope, diags);
+            if (idx.kind != TYPE_INT && idx.kind != TYPE_UNKNOWN) {
+                diag_report(diags, e->span, "indice de array debe ser int");
+            }
+            return (e->inferred_type = (TypeRef){.kind = TYPE_INT, .name = "int"});
+        }
     }
     return (TypeRef){.kind = TYPE_UNKNOWN, .name = "unknown"};
 }
@@ -148,8 +177,13 @@ void semantic_analyze(Program *program, DiagnosticList *diags) {
         for (size_t mi = 0; mi < c->method_count; ++mi) {
             MethodDecl *m = &c->methods[mi];
             Scope root; scope_init(&root, NULL);
+            if (!m->is_static) {
+                for (size_t fi = 0; fi < c->field_count; ++fi) {
+                    scope_add(&root, c->fields[fi].name, c->fields[fi].type);
+                }
+            }
             for (size_t pi = 0; pi < m->param_count; ++pi) scope_add(&root, m->params[pi].name, m->params[pi].type);
-            analyze_stmt(m->body, &root, m->return_type, diags, 0);
+            analyze_stmt(m->body, &root, m->return_type, diags, 0, 0);
         }
     }
 }

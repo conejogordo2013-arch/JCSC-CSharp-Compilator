@@ -18,7 +18,17 @@ make
 ./jccsc examples/hello.cs -o hello.jccsc --run
 ./jccsc examples/functions.cs -o functions.jccsc --run
 ./jccsc examples/bool_loops.cs -o bool_loops.jccsc --run
+./jccsc examples/hello.cs -o native_x64.s --backend native --target x86_64
+./jccsc examples/hello.cs -o native_x86.s --backend native --target x86_32
+./jccsc examples/hello.cs -o native_arm64.s --backend native --target arm64
+./jccsc examples/hello.cs -o native_arm32.s --backend native --target arm32
+./jccsc examples/hello.cs --backend native
+./hello
 ```
+
+En backend `native`, si no pasas `--target`, JCCSC detecta automáticamente la arquitectura del host.
+Si no pasas `-o`, el ejecutable toma el nombre base del archivo de entrada.
+Usa `--emit-asm` para forzar salida ensamblador en lugar de ejecutable.
 
 ## Testing
 
@@ -32,10 +42,15 @@ Incluye una batería amplia de tests de éxito y error bajo `tests/cases`.
 
 - Tipos básicos: `int`, `bool`, `string`, `void`
 - Clases y métodos estáticos
-- Variables, `if/else`, `while`, `for`, `return`, `break`, `continue`
+- Variables, `if/else`, `while`, `do/while`, `for`, `switch`, `return`, `break`, `continue`
+- `using` y bloque `namespace ... { ... }`
+- Objetos por referencia con `new`, campos y metodos de instancia basicos
+- Arrays `int[]`, `new int[n]` e indexación `a[i]`
 - Expresiones aritméticas y lógicas
 - Literales booleanos: `true`, `false`
 - Built-in: `Console.WriteLine(...)`
+- Backend nativo con auto-detección de host para generar ejecutable local
+- Salida ensamblador (`--emit-asm`) para `x86_32`, `x86_64`, `arm32`, `arm64`
 
 ## Nota
 
