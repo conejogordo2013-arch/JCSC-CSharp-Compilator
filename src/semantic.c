@@ -156,7 +156,7 @@ static TypeRef analyze_expr(Expr *e, Scope *scope, DiagnosticList *diags) {
         case EXPR_BINARY: {
             TypeRef l = analyze_expr(e->as.binary.left, scope, diags);
             TypeRef r = analyze_expr(e->as.binary.right, scope, diags);
-            if ((e->as.binary.op == TOK_PLUS || e->as.binary.op == TOK_MINUS || e->as.binary.op == TOK_STAR || e->as.binary.op == TOK_SLASH) &&
+            if ((e->as.binary.op == TOK_PLUS || e->as.binary.op == TOK_MINUS || e->as.binary.op == TOK_STAR || e->as.binary.op == TOK_SLASH || e->as.binary.op == TOK_PERCENT) &&
                 l.kind != TYPE_UNKNOWN && r.kind != TYPE_UNKNOWN &&
                 (l.kind != TYPE_INT || r.kind != TYPE_INT)) {
                 diag_report(diags, e->span, "operacion aritmetica requiere enteros");

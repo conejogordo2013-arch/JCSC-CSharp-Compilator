@@ -152,11 +152,18 @@ run_pass "for_without_condition" $'0\n1\n2'
 run_pass "bool_param_return" "true"
 run_pass "oop_instance" "2"
 run_pass "namespace_using" "321"
+run_pass "using_custom_package" "JuanCarlos"
 run_pass "do_while" $'0\n1\n2'
 run_pass "switch_basic" "22"
 run_pass "arrays_basic" "12"
 run_pass "foreach_length" $'4\n18'
 run_pass "null_references" $'true\ntrue\ntrue\ntrue\n2'
+run_pass "increment_compound" "1"
+run_pass "method_overload" $'5\n9'
+run_pass "method_overload_types" $'123\n1'
+run_pass "method_overload_class_types" $'10\n20'
+run_pass "struct_basic" $'1\n2'
+run_pass "interface_basic" "JuanCarlos"
 
 # NATIVE BACKEND TARGET CASES (4)
 run_native_target "x86_64"
@@ -179,6 +186,10 @@ run_fail "missing_semicolon" "se esperaba ';'"
 run_fail "invalid_token" "caracter no reconocido"
 run_fail "foreach_non_array" "foreach requiere iterable int[]"
 run_fail "null_to_int" "tipo incompatible en inicializacion"
+run_fail "invalid_increment_target" "operador ++/-- requiere una variable asignable"
+run_fail "method_overload_no_match" "no existe sobrecarga compatible"
+run_fail "method_overload_type_no_match" "no existe sobrecarga compatible"
+run_fail "method_overload_class_mismatch" "no existe sobrecarga compatible"
 
 echo
 echo "Resumen: PASS=$pass_count FAIL=$fail_count"
