@@ -82,6 +82,9 @@ static Expr *parse_primary(Parser *p) {
         e->as.bool_value = false;
         return e;
     }
+    if (match(p, TOK_KW_NULL)) {
+        return new_expr(p, EXPR_NULL, prev(p)->span);
+    }
     if (match(p, TOK_STRING_LITERAL)) {
         Expr *e = new_expr(p, EXPR_STRING, prev(p)->span);
         e->as.string_value = prev(p)->lexeme;
@@ -314,6 +317,27 @@ static Stmt *parse_stmt(Parser *p) {
         st->as.for_stmt.condition = cond;
         st->as.for_stmt.increment = inc;
         st->as.for_stmt.body = body;
+        return st;
+    }
+    if (match(p, TOK_KW_FOREACH)) {
+        Span s = prev(p)->span;
+        expect(p, TOK_LPAREN, "se esperaba '('");
+        TypeRef var_type = parse_type(p);
+        if (var_type.kind != TYPE_INT) {
+            diag_report(p->diags, s, "foreach actualmente soporta variable int");
+        }
+        Token *name = expect(p, TOK_IDENTIFIER, "se esperaba nombre de variable en foreach");
+        expect(p, TOK_KW_IN, "se esperaba 'in' en foreach");
+        Expr *iterable = parse_expr(p);
+        expect(p, TOK_RPAREN, "se esperaba ')'");
+        p->loop_depth++;
+        Stmt *body = parse_stmt(p);
+        p->loop_depth--;
+        Stmt *st = new_stmt(p, STMT_FOREACH, s);
+        st->as.foreach_stmt.var_type = var_type;
+        st->as.foreach_stmt.var_name = name->lexeme;
+        st->as.foreach_stmt.iterable = iterable;
+        st->as.foreach_stmt.body = body;
         return st;
     }
     if (match(p, TOK_KW_SWITCH)) {

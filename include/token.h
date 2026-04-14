@@ -23,6 +23,8 @@ typedef enum TokenKind {
     TOK_KW_IF,
     TOK_KW_ELSE,
     TOK_KW_FOR,
+    TOK_KW_FOREACH,
+    TOK_KW_IN,
     TOK_KW_WHILE,
     TOK_KW_DO,
     TOK_KW_SWITCH,
@@ -33,6 +35,7 @@ typedef enum TokenKind {
     TOK_KW_NEW,
     TOK_KW_TRUE,
     TOK_KW_FALSE,
+    TOK_KW_NULL,
 
     TOK_LPAREN,
     TOK_RPAREN,

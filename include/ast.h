@@ -11,6 +11,7 @@ typedef enum TypeKind {
     TYPE_STRING,
     TYPE_VOID,
     TYPE_CLASS,
+    TYPE_NULL,
     TYPE_UNKNOWN,
 } TypeKind;
 
@@ -22,6 +23,7 @@ typedef struct TypeRef {
 typedef enum ExprKind {
     EXPR_INT,
     EXPR_BOOL,
+    EXPR_NULL,
     EXPR_STRING,
     EXPR_IDENTIFIER,
     EXPR_BINARY,
@@ -92,6 +94,7 @@ typedef enum StmtKind {
     STMT_WHILE,
     STMT_DO_WHILE,
     STMT_FOR,
+    STMT_FOREACH,
     STMT_SWITCH,
     STMT_RETURN,
     STMT_BREAK,
@@ -133,6 +136,12 @@ struct Stmt {
             Expr *increment;
             Stmt *body;
         } for_stmt;
+        struct {
+            TypeRef var_type;
+            const char *var_name;
+            Expr *iterable;
+            Stmt *body;
+        } foreach_stmt;
         struct {
             Expr *expr;
             SwitchCase *cases;

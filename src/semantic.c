@@ -35,6 +35,15 @@ static TypeRef analyze_expr(Expr *e, Scope *scope, DiagnosticList *diags);
 static int is_truthy_compatible(TypeRef t) {
     return t.kind == TYPE_BOOL || t.kind == TYPE_INT || t.kind == TYPE_UNKNOWN;
 }
+static int is_int_array_type(TypeRef t) {
+    return t.kind == TYPE_CLASS && t.name && strcmp(t.name, "int[]") == 0;
+}
+static int types_compatible(TypeRef expected, TypeRef found) {
+    if (expected.kind == TYPE_UNKNOWN || found.kind == TYPE_UNKNOWN) return 1;
+    if (expected.kind == found.kind) return 1;
+    if (expected.kind == TYPE_CLASS && found.kind == TYPE_NULL) return 1;
+    return 0;
+}
 
 static void analyze_stmt(Stmt *s, Scope *scope, TypeRef ret_type, DiagnosticList *diags, int loop_depth, int switch_depth) {
     switch (s->kind) {
@@ -46,7 +55,7 @@ static void analyze_stmt(Stmt *s, Scope *scope, TypeRef ret_type, DiagnosticList
         case STMT_VAR: {
             if (s->as.var.initializer) {
                 TypeRef init = analyze_expr(s->as.var.initializer, scope, diags);
-                if (s->as.var.type.kind != TYPE_UNKNOWN && init.kind != TYPE_UNKNOWN && s->as.var.type.kind != init.kind) {
+                if (!types_compatible(s->as.var.type, init)) {
                     diag_report(diags, s->span, "tipo incompatible en inicializacion de '%s'", s->as.var.name);
                 }
             }
@@ -85,6 +94,16 @@ static void analyze_stmt(Stmt *s, Scope *scope, TypeRef ret_type, DiagnosticList
             analyze_stmt(s->as.for_stmt.body, &child, ret_type, diags, loop_depth + 1, switch_depth);
             break;
         }
+        case STMT_FOREACH: {
+            Scope child; scope_init(&child, scope);
+            TypeRef iterable_type = analyze_expr(s->as.foreach_stmt.iterable, &child, diags);
+            if (!is_int_array_type(iterable_type) && iterable_type.kind != TYPE_UNKNOWN) {
+                diag_report(diags, s->span, "foreach requiere iterable int[]");
+            }
+            scope_add(&child, s->as.foreach_stmt.var_name, s->as.foreach_stmt.var_type);
+            analyze_stmt(s->as.foreach_stmt.body, &child, ret_type, diags, loop_depth + 1, switch_depth);
+            break;
+        }
         case STMT_SWITCH:
             analyze_expr(s->as.switch_stmt.expr, scope, diags);
             for (size_t i = 0; i < s->as.switch_stmt.case_count; ++i) {
@@ -96,7 +115,7 @@ static void analyze_stmt(Stmt *s, Scope *scope, TypeRef ret_type, DiagnosticList
             break;
         case STMT_RETURN: {
             TypeRef found = s->as.return_expr ? analyze_expr(s->as.return_expr, scope, diags) : (TypeRef){.kind = TYPE_VOID, .name = "void"};
-            if (ret_type.kind != TYPE_UNKNOWN && ret_type.kind != found.kind) {
+            if (!types_compatible(ret_type, found)) {
                 diag_report(diags, s->span, "tipo de retorno incompatible. esperado '%s'", ret_type.name);
             }
             break;
@@ -116,6 +135,7 @@ static TypeRef analyze_expr(Expr *e, Scope *scope, DiagnosticList *diags) {
     switch (e->kind) {
         case EXPR_INT: return (e->inferred_type = (TypeRef){.kind = TYPE_INT, .name = "int"});
         case EXPR_BOOL: return (e->inferred_type = (TypeRef){.kind = TYPE_BOOL, .name = "bool"});
+        case EXPR_NULL: return (e->inferred_type = (TypeRef){.kind = TYPE_NULL, .name = "null"});
         case EXPR_STRING: return (e->inferred_type = (TypeRef){.kind = TYPE_STRING, .name = "string"});
         case EXPR_IDENTIFIER: {
             TypeRef t;
@@ -128,7 +148,7 @@ static TypeRef analyze_expr(Expr *e, Scope *scope, DiagnosticList *diags) {
         case EXPR_ASSIGN: {
             TypeRef a = analyze_expr(e->as.assign.target, scope, diags);
             TypeRef b = analyze_expr(e->as.assign.value, scope, diags);
-            if (a.kind != TYPE_UNKNOWN && b.kind != TYPE_UNKNOWN && a.kind != b.kind) {
+            if (!types_compatible(a, b)) {
                 diag_report(diags, e->span, "asignacion con tipos incompatibles");
             }
             return (e->inferred_type = a);
@@ -152,8 +172,13 @@ static TypeRef analyze_expr(Expr *e, Scope *scope, DiagnosticList *diags) {
         case EXPR_UNARY:
             return (e->inferred_type = analyze_expr(e->as.unary.operand, scope, diags));
         case EXPR_MEMBER:
-            analyze_expr(e->as.member.object, scope, diags);
-            return (e->inferred_type = (TypeRef){.kind = TYPE_UNKNOWN, .name = "unknown"});
+            {
+                TypeRef obj = analyze_expr(e->as.member.object, scope, diags);
+                if (is_int_array_type(obj) && strcmp(e->as.member.member, "Length") == 0) {
+                    return (e->inferred_type = (TypeRef){.kind = TYPE_INT, .name = "int"});
+                }
+                return (e->inferred_type = (TypeRef){.kind = TYPE_UNKNOWN, .name = "unknown"});
+            }
         case EXPR_CALL:
             for (size_t i = 0; i < e->as.call.args.count; ++i) analyze_expr(e->as.call.args.items[i], scope, diags);
             return (e->inferred_type = (TypeRef){.kind = TYPE_UNKNOWN, .name = "unknown"});

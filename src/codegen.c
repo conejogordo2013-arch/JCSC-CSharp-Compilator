@@ -10,6 +10,7 @@ typedef enum RuntimeValueKind {
     RV_STRING,
     RV_OBJECT,
     RV_ARRAY,
+    RV_NULL,
     RV_VOID,
 } RuntimeValueKind;
 
@@ -67,6 +68,7 @@ static RuntimeValue rv_string(const char *s) { return (RuntimeValue){.kind = RV_
 static RuntimeValue rv_void(void) { return (RuntimeValue){.kind = RV_VOID}; }
 static RuntimeValue rv_object(ObjectInstance *obj) { return (RuntimeValue){.kind = RV_OBJECT, .object_value = obj, .int_value = 0}; }
 static RuntimeValue rv_array(ArrayInstance *arr) { return (RuntimeValue){.kind = RV_ARRAY, .array_value = arr}; }
+static RuntimeValue rv_null(void) { return (RuntimeValue){.kind = RV_NULL}; }
 
 static ObjectField *object_find_field(ObjectInstance *obj, const char *name) {
     if (!obj) return NULL;
@@ -135,7 +137,9 @@ static ObjectInstance *create_object(ExecContext *ctx, const char *class_name) {
     ObjectInstance *obj = calloc(1, sizeof(ObjectInstance));
     obj->class_name = class_name;
     for (size_t i = 0; i < c->field_count && i < 256; ++i) {
-        obj->fields[obj->field_count++] = (ObjectField){.name = c->fields[i].name, .value = rv_int(0)};
+        RuntimeValue init = rv_int(0);
+        if (c->fields[i].type.kind == TYPE_CLASS) init = rv_null();
+        obj->fields[obj->field_count++] = (ObjectField){.name = c->fields[i].name, .value = init};
     }
     return obj;
 }
@@ -148,6 +152,7 @@ static int truthy(RuntimeValue v) {
     if (v.kind == RV_BOOL) return v.int_value != 0;
     if (v.kind == RV_OBJECT) return v.object_value != NULL;
     if (v.kind == RV_ARRAY) return v.array_value != NULL;
+    if (v.kind == RV_NULL) return 0;
     if (v.kind == RV_STRING) return v.string_value && v.string_value[0] != '\0';
     return 0;
 }
@@ -161,8 +166,34 @@ static RuntimeValue eval_binary(TokenKind op, RuntimeValue a, RuntimeValue b) {
         case TOK_STAR: return rv_int(ai * bi);
         case TOK_SLASH: return rv_int(bi == 0 ? 0 : ai / bi);
         case TOK_PERCENT: return rv_int(bi == 0 ? 0 : ai % bi);
-        case TOK_EQ: return rv_bool(ai == bi);
-        case TOK_NEQ: return rv_bool(ai != bi);
+        case TOK_EQ:
+            if (a.kind == RV_NULL || b.kind == RV_NULL) {
+                int an = (a.kind == RV_NULL) || (a.kind == RV_OBJECT && !a.object_value) || (a.kind == RV_ARRAY && !a.array_value);
+                int bn = (b.kind == RV_NULL) || (b.kind == RV_OBJECT && !b.object_value) || (b.kind == RV_ARRAY && !b.array_value);
+                return rv_bool(an == bn);
+            }
+            if (a.kind == RV_OBJECT && b.kind == RV_OBJECT) return rv_bool(a.object_value == b.object_value);
+            if (a.kind == RV_ARRAY && b.kind == RV_ARRAY) return rv_bool(a.array_value == b.array_value);
+            if (a.kind == RV_STRING && b.kind == RV_STRING) {
+                const char *as = a.string_value ? a.string_value : "";
+                const char *bs = b.string_value ? b.string_value : "";
+                return rv_bool(strcmp(as, bs) == 0);
+            }
+            return rv_bool(ai == bi);
+        case TOK_NEQ:
+            if (a.kind == RV_NULL || b.kind == RV_NULL) {
+                int an = (a.kind == RV_NULL) || (a.kind == RV_OBJECT && !a.object_value) || (a.kind == RV_ARRAY && !a.array_value);
+                int bn = (b.kind == RV_NULL) || (b.kind == RV_OBJECT && !b.object_value) || (b.kind == RV_ARRAY && !b.array_value);
+                return rv_bool(an != bn);
+            }
+            if (a.kind == RV_OBJECT && b.kind == RV_OBJECT) return rv_bool(a.object_value != b.object_value);
+            if (a.kind == RV_ARRAY && b.kind == RV_ARRAY) return rv_bool(a.array_value != b.array_value);
+            if (a.kind == RV_STRING && b.kind == RV_STRING) {
+                const char *as = a.string_value ? a.string_value : "";
+                const char *bs = b.string_value ? b.string_value : "";
+                return rv_bool(strcmp(as, bs) != 0);
+            }
+            return rv_bool(ai != bi);
         case TOK_LT: return rv_bool(ai < bi);
         case TOK_LE: return rv_bool(ai <= bi);
         case TOK_GT: return rv_bool(ai > bi);
@@ -183,6 +214,7 @@ static RuntimeValue call_method(ExecContext *ctx,
         RuntimeValue v = eval_expr(ctx, caller, args.items[0]);
         if (v.kind == RV_STRING) printf("%s\n", v.string_value ? v.string_value : "");
         else if (v.kind == RV_BOOL) printf("%s\n", v.int_value ? "true" : "false");
+        else if (v.kind == RV_NULL) printf("null\n");
         else if (v.kind == RV_OBJECT) printf("<object %s>\n", v.object_value ? v.object_value->class_name : "null");
         else if (v.kind == RV_ARRAY) printf("<array len=%d>\n", v.array_value ? v.array_value->length : 0);
         else printf("%d\n", v.int_value);
@@ -233,6 +265,7 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
     switch (e->kind) {
         case EXPR_INT: return rv_int(e->as.int_value);
         case EXPR_BOOL: return rv_bool(e->as.bool_value);
+        case EXPR_NULL: return rv_null();
         case EXPR_STRING: return rv_string(e->as.string_value);
         case EXPR_IDENTIFIER: {
             VarSlot *slot = frame_find(frame, e->as.identifier);
@@ -287,6 +320,9 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
             }
             {
                 RuntimeValue obj = eval_expr(ctx, frame, e->as.member.object);
+                if (obj.kind == RV_ARRAY && strcmp(e->as.member.member, "Length") == 0) {
+                    return rv_int(obj.array_value ? obj.array_value->length : 0);
+                }
                 if (obj.object_value) {
                     ObjectField *field = object_find_field(obj.object_value, e->as.member.member);
                     if (field) return field->value;
@@ -363,6 +399,7 @@ static void exec_stmt(ExecContext *ctx, Frame *frame, Stmt *s) {
         }
         case STMT_VAR: {
             RuntimeValue v = rv_int(0);
+            if (s->as.var.type.kind == TYPE_CLASS) v = rv_null();
             if (s->as.var.initializer) v = eval_expr(ctx, frame, s->as.var.initializer);
             frame_define(frame, s->as.var.name, v);
             break;
@@ -416,6 +453,27 @@ static void exec_stmt(ExecContext *ctx, Frame *frame, Stmt *s) {
                     break;
                 }
                 if (s->as.for_stmt.increment) (void)eval_expr(ctx, &loop, s->as.for_stmt.increment);
+                if (ctx->did_continue) {
+                    ctx->did_continue = 0;
+                    continue;
+                }
+            }
+            if (!matched && s->as.switch_stmt.default_body) exec_stmt(ctx, frame, s->as.switch_stmt.default_body);
+            if (ctx->did_break) ctx->did_break = 0;
+            break;
+        }
+        case STMT_FOREACH: {
+            RuntimeValue iterable = eval_expr(ctx, frame, s->as.foreach_stmt.iterable);
+            if (iterable.kind != RV_ARRAY || !iterable.array_value) break;
+            Frame loop;
+            frame_init(&loop, frame);
+            for (int i = 0; i < iterable.array_value->length && !ctx->did_return; ++i) {
+                frame_define(&loop, s->as.foreach_stmt.var_name, rv_int(iterable.array_value->items[i]));
+                exec_stmt(ctx, &loop, s->as.foreach_stmt.body);
+                if (ctx->did_break) {
+                    ctx->did_break = 0;
+                    break;
+                }
                 if (ctx->did_continue) {
                     ctx->did_continue = 0;
                     continue;

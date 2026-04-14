@@ -155,6 +155,8 @@ run_pass "namespace_using" "321"
 run_pass "do_while" $'0\n1\n2'
 run_pass "switch_basic" "22"
 run_pass "arrays_basic" "12"
+run_pass "foreach_length" $'4\n18'
+run_pass "null_references" $'true\ntrue\ntrue\ntrue\n2'
 
 # NATIVE BACKEND TARGET CASES (4)
 run_native_target "x86_64"
@@ -175,6 +177,8 @@ run_fail "while_string_condition" "la condicion de while debe ser bool/int"
 run_fail "unterminated_string" "literal string sin cerrar"
 run_fail "missing_semicolon" "se esperaba ';'"
 run_fail "invalid_token" "caracter no reconocido"
+run_fail "foreach_non_array" "foreach requiere iterable int[]"
+run_fail "null_to_int" "tipo incompatible en inicializacion"
 
 echo
 echo "Resumen: PASS=$pass_count FAIL=$fail_count"

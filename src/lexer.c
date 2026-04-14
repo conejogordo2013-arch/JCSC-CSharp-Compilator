@@ -26,6 +26,8 @@ static TokenKind keyword_kind(const char *lexeme) {
     if (strcmp(lexeme, "if") == 0) return TOK_KW_IF;
     if (strcmp(lexeme, "else") == 0) return TOK_KW_ELSE;
     if (strcmp(lexeme, "for") == 0) return TOK_KW_FOR;
+    if (strcmp(lexeme, "foreach") == 0) return TOK_KW_FOREACH;
+    if (strcmp(lexeme, "in") == 0) return TOK_KW_IN;
     if (strcmp(lexeme, "while") == 0) return TOK_KW_WHILE;
     if (strcmp(lexeme, "do") == 0) return TOK_KW_DO;
     if (strcmp(lexeme, "switch") == 0) return TOK_KW_SWITCH;
@@ -36,6 +38,7 @@ static TokenKind keyword_kind(const char *lexeme) {
     if (strcmp(lexeme, "new") == 0) return TOK_KW_NEW;
     if (strcmp(lexeme, "true") == 0) return TOK_KW_TRUE;
     if (strcmp(lexeme, "false") == 0) return TOK_KW_FALSE;
+    if (strcmp(lexeme, "null") == 0) return TOK_KW_NULL;
     return TOK_IDENTIFIER;
 }
 

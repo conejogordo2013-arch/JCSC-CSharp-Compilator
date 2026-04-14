@@ -20,6 +20,8 @@ const char *token_kind_name(TokenKind kind) {
         case TOK_KW_IF: return "if";
         case TOK_KW_ELSE: return "else";
         case TOK_KW_FOR: return "for";
+        case TOK_KW_FOREACH: return "foreach";
+        case TOK_KW_IN: return "in";
         case TOK_KW_WHILE: return "while";
         case TOK_KW_DO: return "do";
         case TOK_KW_SWITCH: return "switch";
@@ -30,6 +32,7 @@ const char *token_kind_name(TokenKind kind) {
         case TOK_KW_NEW: return "new";
         case TOK_KW_TRUE: return "true";
         case TOK_KW_FALSE: return "false";
+        case TOK_KW_NULL: return "null";
         case TOK_LBRACKET: return "[";
         case TOK_RBRACKET: return "]";
         case TOK_COLON: return ":";

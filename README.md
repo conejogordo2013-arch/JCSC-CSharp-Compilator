@@ -46,8 +46,11 @@ Incluye una batería amplia de tests de éxito y error bajo `tests/cases`.
 - `using` y bloque `namespace ... { ... }`
 - Objetos por referencia con `new`, campos y metodos de instancia basicos
 - Arrays `int[]`, `new int[n]` e indexación `a[i]`
+- `foreach (int x in arr)` sobre `int[]`
+- Propiedad `arr.Length` para arrays
 - Expresiones aritméticas y lógicas
 - Literales booleanos: `true`, `false`
+- Literal `null` para tipos por referencia (`class`, `int[]`) y comparaciones `==`/`!=`
 - Built-in: `Console.WriteLine(...)`
 - Backend nativo con auto-detección de host para generar ejecutable local
 - Salida ensamblador (`--emit-asm`) para `x86_32`, `x86_64`, `arm32`, `arm64`
@@ -59,5 +62,8 @@ La ejecución se hace en el runtime propio dentro de `jccsc`.
 
 ## Objetivo de largo plazo
 
-El objetivo es seguir ampliando el subset hasta acercarse a C# completo y
-disponer de backend nativo real (sin VM). Esta versión todavía usa runtime interno.
+El objetivo es seguir ampliando el subset hasta acercarse a C# completo.
+Actualmente **no implementa .NET 8 ni todo C#**: faltan, entre otros, generics,
+LINQ, async/await, excepciones completas, delegates/events, attributes, structs,
+interfaces avanzadas, nullable reference types, reflection, librería base completa
+y backend nativo AOT real con ABI completo.
