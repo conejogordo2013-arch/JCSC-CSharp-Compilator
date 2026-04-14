@@ -41,7 +41,7 @@ static int is_int_array_type(TypeRef t) {
 static int types_compatible(TypeRef expected, TypeRef found) {
     if (expected.kind == TYPE_UNKNOWN || found.kind == TYPE_UNKNOWN) return 1;
     if (expected.kind == found.kind) return 1;
-    if (expected.kind == TYPE_CLASS && found.kind == TYPE_NULL) return 1;
+    if ((expected.kind == TYPE_CLASS || expected.kind == TYPE_STRING) && found.kind == TYPE_NULL) return 1;
     return 0;
 }
 
@@ -128,6 +128,23 @@ static void analyze_stmt(Stmt *s, Scope *scope, TypeRef ret_type, DiagnosticList
                 diag_report(diags, s->span, "'continue' fuera de bucle");
             }
             break;
+        case STMT_TRY_CATCH: {
+            analyze_stmt(s->as.try_catch_stmt.try_block, scope, ret_type, diags, loop_depth, switch_depth);
+            for (size_t i = 0; i < s->as.try_catch_stmt.catch_count; ++i) {
+                CatchClause *cc = &s->as.try_catch_stmt.catches[i];
+                Scope catch_scope;
+                scope_init(&catch_scope, scope);
+                if (cc->catch_name) scope_add(&catch_scope, cc->catch_name, cc->catch_type);
+                analyze_stmt(cc->catch_block, &catch_scope, ret_type, diags, loop_depth, switch_depth);
+            }
+            if (s->as.try_catch_stmt.finally_block) {
+                analyze_stmt(s->as.try_catch_stmt.finally_block, scope, ret_type, diags, loop_depth, switch_depth);
+            }
+            break;
+        }
+        case STMT_THROW:
+            if (s->as.throw_expr) (void)analyze_expr(s->as.throw_expr, scope, diags);
+            break;
     }
 }
 
@@ -156,9 +173,17 @@ static TypeRef analyze_expr(Expr *e, Scope *scope, DiagnosticList *diags) {
         case EXPR_BINARY: {
             TypeRef l = analyze_expr(e->as.binary.left, scope, diags);
             TypeRef r = analyze_expr(e->as.binary.right, scope, diags);
-            if ((e->as.binary.op == TOK_PLUS || e->as.binary.op == TOK_MINUS || e->as.binary.op == TOK_STAR || e->as.binary.op == TOK_SLASH || e->as.binary.op == TOK_PERCENT) &&
-                l.kind != TYPE_UNKNOWN && r.kind != TYPE_UNKNOWN &&
-                (l.kind != TYPE_INT || r.kind != TYPE_INT)) {
+            if (e->as.binary.op == TOK_PLUS &&
+                l.kind != TYPE_UNKNOWN && r.kind != TYPE_UNKNOWN) {
+                int both_int = (l.kind == TYPE_INT && r.kind == TYPE_INT);
+                int has_string = (l.kind == TYPE_STRING || r.kind == TYPE_STRING);
+                if (!both_int && !has_string) {
+                    diag_report(diags, e->span, "operador '+' requiere enteros o al menos un string");
+                }
+            } else if ((e->as.binary.op == TOK_MINUS || e->as.binary.op == TOK_STAR ||
+                        e->as.binary.op == TOK_SLASH || e->as.binary.op == TOK_PERCENT) &&
+                       l.kind != TYPE_UNKNOWN && r.kind != TYPE_UNKNOWN &&
+                       (l.kind != TYPE_INT || r.kind != TYPE_INT)) {
                 diag_report(diags, e->span, "operacion aritmetica requiere enteros");
             }
             if (e->as.binary.op == TOK_EQ || e->as.binary.op == TOK_NEQ ||
@@ -166,6 +191,14 @@ static TypeRef analyze_expr(Expr *e, Scope *scope, DiagnosticList *diags) {
                 e->as.binary.op == TOK_GT || e->as.binary.op == TOK_GE ||
                 e->as.binary.op == TOK_AND || e->as.binary.op == TOK_OR) {
                 return (e->inferred_type = (TypeRef){.kind = TYPE_BOOL, .name = "bool"});
+            }
+            if (e->as.binary.op == TOK_COALESCE) {
+                if (l.kind == TYPE_NULL) return (e->inferred_type = r);
+                if (r.kind == TYPE_NULL) return (e->inferred_type = l);
+                return (e->inferred_type = l.kind != TYPE_UNKNOWN ? l : r);
+            }
+            if (e->as.binary.op == TOK_PLUS && (l.kind == TYPE_STRING || r.kind == TYPE_STRING)) {
+                return (e->inferred_type = (TypeRef){.kind = TYPE_STRING, .name = "string"});
             }
             return (e->inferred_type = l);
         }
@@ -191,6 +224,18 @@ static TypeRef analyze_expr(Expr *e, Scope *scope, DiagnosticList *diags) {
                 diag_report(diags, e->span, "indice de array debe ser int");
             }
             return (e->inferred_type = (TypeRef){.kind = TYPE_INT, .name = "int"});
+        }
+        case EXPR_CONDITIONAL: {
+            TypeRef c = analyze_expr(e->as.conditional.condition, scope, diags);
+            TypeRef t = analyze_expr(e->as.conditional.when_true, scope, diags);
+            TypeRef f = analyze_expr(e->as.conditional.when_false, scope, diags);
+            if (!is_truthy_compatible(c)) {
+                diag_report(diags, e->span, "la condicion del operador ternario debe ser bool/int");
+            }
+            if (types_compatible(t, f)) return (e->inferred_type = t);
+            if (types_compatible(f, t)) return (e->inferred_type = f);
+            diag_report(diags, e->span, "ramas incompatibles en operador ternario");
+            return (e->inferred_type = (TypeRef){.kind = TYPE_UNKNOWN, .name = "unknown"});
         }
     }
     return (TypeRef){.kind = TYPE_UNKNOWN, .name = "unknown"};

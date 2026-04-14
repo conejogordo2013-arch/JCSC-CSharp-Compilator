@@ -32,9 +32,17 @@ const char *token_kind_name(TokenKind kind) {
         case TOK_KW_BREAK: return "break";
         case TOK_KW_CONTINUE: return "continue";
         case TOK_KW_NEW: return "new";
+        case TOK_KW_ASYNC: return "async";
+        case TOK_KW_AWAIT: return "await";
         case TOK_KW_TRUE: return "true";
         case TOK_KW_FALSE: return "false";
         case TOK_KW_NULL: return "null";
+        case TOK_KW_TRY: return "try";
+        case TOK_KW_CATCH: return "catch";
+        case TOK_KW_FINALLY: return "finally";
+        case TOK_KW_THROW: return "throw";
+        case TOK_COALESCE: return "??";
+        case TOK_QUESTION: return "?";
         case TOK_PLUS_ASSIGN: return "+=";
         case TOK_MINUS_ASSIGN: return "-=";
         case TOK_STAR_ASSIGN: return "*=";

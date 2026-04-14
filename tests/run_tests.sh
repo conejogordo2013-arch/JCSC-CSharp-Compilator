@@ -146,6 +146,7 @@ run_pass "nested_blocks" $'2\n1'
 run_pass "method_calls" "42"
 run_pass "recursion_factorial" "120"
 run_pass "string_print" "hola"
+run_pass "string_concat" $'JuanCarlos\nN=7\nB=true\nX=null'
 run_pass "comparisons" $'true\ntrue\ntrue\ntrue\ntrue\ntrue'
 run_pass "unary_ops" $'-5\ntrue'
 run_pass "for_without_condition" $'0\n1\n2'
@@ -164,6 +165,19 @@ run_pass "method_overload_types" $'123\n1'
 run_pass "method_overload_class_types" $'10\n20'
 run_pass "struct_basic" $'1\n2'
 run_pass "interface_basic" "JuanCarlos"
+run_pass "try_catch_throw" "capturado: boom"
+run_pass "try_finally" $'A\nF'
+run_pass "try_catch_finally" $'C:x\nF'
+run_pass "rethrow_nested_catch" $'mid\nouter:inner'
+run_pass "multi_catch" $'N=7\nF'
+run_pass "catch_all" "catched-all"
+run_pass "short_circuit" $'1\n222\n2'
+run_pass "null_coalescing" $'Carlos\nJuan'
+run_pass "ternary_basic" $'10\n20\nJuan'
+run_pass "default_return_values" $'false\nnull\ntrue'
+run_pass "generics_syntax_basic" "5"
+run_pass "async_await_basic" "7"
+run_pass "list_int_basic" $'2\n30\n7\n0'
 
 # NATIVE BACKEND TARGET CASES (4)
 run_native_target "x86_64"
@@ -184,12 +198,17 @@ run_fail "while_string_condition" "la condicion de while debe ser bool/int"
 run_fail "unterminated_string" "literal string sin cerrar"
 run_fail "missing_semicolon" "se esperaba ';'"
 run_fail "invalid_token" "caracter no reconocido"
+run_fail "invalid_plus_operands" "operador '+' requiere enteros o al menos un string"
 run_fail "foreach_non_array" "foreach requiere iterable int[]"
 run_fail "null_to_int" "tipo incompatible en inicializacion"
 run_fail "invalid_increment_target" "operador ++/-- requiere una variable asignable"
 run_fail "method_overload_no_match" "no existe sobrecarga compatible"
 run_fail "method_overload_type_no_match" "no existe sobrecarga compatible"
 run_fail "method_overload_class_mismatch" "no existe sobrecarga compatible"
+run_fail "throw_uncaught" "excepcion no capturada"
+run_fail "rethrow_without_active_exception" "throw sin excepcion activa"
+run_fail "multi_catch_unmatched" "excepcion no capturada"
+run_fail "ternary_non_bool_condition" "la condicion del operador ternario debe ser bool/int"
 
 echo
 echo "Resumen: PASS=$pass_count FAIL=$fail_count"

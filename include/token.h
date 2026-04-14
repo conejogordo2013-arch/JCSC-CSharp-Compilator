@@ -35,9 +35,15 @@ typedef enum TokenKind {
     TOK_KW_BREAK,
     TOK_KW_CONTINUE,
     TOK_KW_NEW,
+    TOK_KW_ASYNC,
+    TOK_KW_AWAIT,
     TOK_KW_TRUE,
     TOK_KW_FALSE,
     TOK_KW_NULL,
+    TOK_KW_TRY,
+    TOK_KW_CATCH,
+    TOK_KW_FINALLY,
+    TOK_KW_THROW,
 
     TOK_LPAREN,
     TOK_RPAREN,
@@ -49,6 +55,7 @@ typedef enum TokenKind {
     TOK_COLON,
     TOK_COMMA,
     TOK_DOT,
+    TOK_QUESTION,
 
     TOK_ASSIGN,
     TOK_PLUS_ASSIGN,
@@ -72,6 +79,7 @@ typedef enum TokenKind {
     TOK_AND,
     TOK_OR,
     TOK_NOT,
+    TOK_COALESCE,
 } TokenKind;
 
 typedef struct Span {

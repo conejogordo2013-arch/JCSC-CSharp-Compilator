@@ -38,9 +38,15 @@ static TokenKind keyword_kind(const char *lexeme) {
     if (strcmp(lexeme, "break") == 0) return TOK_KW_BREAK;
     if (strcmp(lexeme, "continue") == 0) return TOK_KW_CONTINUE;
     if (strcmp(lexeme, "new") == 0) return TOK_KW_NEW;
+    if (strcmp(lexeme, "async") == 0) return TOK_KW_ASYNC;
+    if (strcmp(lexeme, "await") == 0) return TOK_KW_AWAIT;
     if (strcmp(lexeme, "true") == 0) return TOK_KW_TRUE;
     if (strcmp(lexeme, "false") == 0) return TOK_KW_FALSE;
     if (strcmp(lexeme, "null") == 0) return TOK_KW_NULL;
+    if (strcmp(lexeme, "try") == 0) return TOK_KW_TRY;
+    if (strcmp(lexeme, "catch") == 0) return TOK_KW_CATCH;
+    if (strcmp(lexeme, "finally") == 0) return TOK_KW_FINALLY;
+    if (strcmp(lexeme, "throw") == 0) return TOK_KW_THROW;
     return TOK_IDENTIFIER;
 }
 
@@ -162,6 +168,14 @@ void lex_source(const char *source, Vector *tokens, DiagnosticList *diags) {
             case '|':
                 if (source[i + 1] == '|') { push_token(tokens, TOK_OR, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
                 else diag_report(diags, (Span){.line = line, .column = col}, "se esperaba '|' para operador ||");
+                break;
+            case '?':
+                if (source[i + 1] == '?') { push_token(tokens, TOK_COALESCE, slice_dup(source, start, 2), line, start_col, start, 2); i += 2; col += 2; }
+                else {
+                    push_token(tokens, TOK_QUESTION, slice_dup(source, start, 1), line, start_col, start, 1);
+                    i++;
+                    col++;
+                }
                 break;
             default:
                 diag_report(diags, (Span){.line = line, .column = col}, "caracter no reconocido: '%c'", c);

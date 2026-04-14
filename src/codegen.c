@@ -10,6 +10,7 @@ typedef enum RuntimeValueKind {
     RV_STRING,
     RV_OBJECT,
     RV_ARRAY,
+    RV_LIST,
     RV_NULL,
     RV_VOID,
 } RuntimeValueKind;
@@ -20,6 +21,7 @@ typedef struct RuntimeValue {
     const char *string_value;
     struct ObjectInstance *object_value;
     struct ArrayInstance *array_value;
+    struct ListInstance *list_value;
 } RuntimeValue;
 
 typedef struct VarSlot {
@@ -49,13 +51,23 @@ typedef struct ArrayInstance {
     int length;
 } ArrayInstance;
 
+typedef struct ListInstance {
+    int *items;
+    int count;
+    int capacity;
+} ListInstance;
+
 typedef struct ExecContext {
     Program *program;
     DiagnosticList *diags;
     int did_return;
     int did_break;
     int did_continue;
+    int did_throw;
     RuntimeValue return_value;
+    RuntimeValue thrown_value;
+    RuntimeValue active_exception;
+    int has_active_exception;
     const char *current_class;
     ObjectInstance *current_this;
 } ExecContext;
@@ -68,7 +80,42 @@ static RuntimeValue rv_string(const char *s) { return (RuntimeValue){.kind = RV_
 static RuntimeValue rv_void(void) { return (RuntimeValue){.kind = RV_VOID}; }
 static RuntimeValue rv_object(ObjectInstance *obj) { return (RuntimeValue){.kind = RV_OBJECT, .object_value = obj, .int_value = 0}; }
 static RuntimeValue rv_array(ArrayInstance *arr) { return (RuntimeValue){.kind = RV_ARRAY, .array_value = arr}; }
+static RuntimeValue rv_list(ListInstance *list) { return (RuntimeValue){.kind = RV_LIST, .list_value = list}; }
 static RuntimeValue rv_null(void) { return (RuntimeValue){.kind = RV_NULL}; }
+
+static RuntimeValue default_value_for_type(TypeRef t) {
+    switch (t.kind) {
+        case TYPE_INT: return rv_int(0);
+        case TYPE_BOOL: return rv_bool(0);
+        case TYPE_STRING: return rv_null();
+        case TYPE_CLASS: return rv_null();
+        case TYPE_VOID: return rv_void();
+        default: return rv_void();
+    }
+}
+
+static const char *runtime_value_to_cstr(RuntimeValue v, char *buf, size_t buf_size) {
+    if (v.kind == RV_STRING) return v.string_value ? v.string_value : "";
+    if (v.kind == RV_BOOL) {
+        snprintf(buf, buf_size, "%s", v.int_value ? "true" : "false");
+        return buf;
+    }
+    if (v.kind == RV_NULL) return "null";
+    if (v.kind == RV_OBJECT) {
+        snprintf(buf, buf_size, "<object %s>", v.object_value ? v.object_value->class_name : "null");
+        return buf;
+    }
+    if (v.kind == RV_ARRAY) {
+        snprintf(buf, buf_size, "<array len=%d>", v.array_value ? v.array_value->length : 0);
+        return buf;
+    }
+    if (v.kind == RV_LIST) {
+        snprintf(buf, buf_size, "<list count=%d>", v.list_value ? v.list_value->count : 0);
+        return buf;
+    }
+    snprintf(buf, buf_size, "%d", v.int_value);
+    return buf;
+}
 
 static ObjectField *object_find_field(ObjectInstance *obj, const char *name) {
     if (!obj) return NULL;
@@ -188,6 +235,7 @@ static int truthy(RuntimeValue v) {
     if (v.kind == RV_BOOL) return v.int_value != 0;
     if (v.kind == RV_OBJECT) return v.object_value != NULL;
     if (v.kind == RV_ARRAY) return v.array_value != NULL;
+    if (v.kind == RV_LIST) return v.list_value != NULL;
     if (v.kind == RV_NULL) return 0;
     if (v.kind == RV_STRING) return v.string_value && v.string_value[0] != '\0';
     return 0;
@@ -197,19 +245,32 @@ static RuntimeValue eval_binary(TokenKind op, RuntimeValue a, RuntimeValue b) {
     int ai = a.kind == RV_INT ? a.int_value : 0;
     int bi = b.kind == RV_INT ? b.int_value : 0;
     switch (op) {
-        case TOK_PLUS: return rv_int(ai + bi);
+        case TOK_PLUS:
+            if (a.kind == RV_STRING || b.kind == RV_STRING) {
+                char abuf[64], bbuf[64];
+                const char *as = runtime_value_to_cstr(a, abuf, sizeof(abuf));
+                const char *bs = runtime_value_to_cstr(b, bbuf, sizeof(bbuf));
+                size_t n1 = strlen(as), n2 = strlen(bs);
+                char *out = malloc(n1 + n2 + 1);
+                memcpy(out, as, n1);
+                memcpy(out + n1, bs, n2);
+                out[n1 + n2] = '\0';
+                return rv_string(out);
+            }
+            return rv_int(ai + bi);
         case TOK_MINUS: return rv_int(ai - bi);
         case TOK_STAR: return rv_int(ai * bi);
         case TOK_SLASH: return rv_int(bi == 0 ? 0 : ai / bi);
         case TOK_PERCENT: return rv_int(bi == 0 ? 0 : ai % bi);
         case TOK_EQ:
             if (a.kind == RV_NULL || b.kind == RV_NULL) {
-                int an = (a.kind == RV_NULL) || (a.kind == RV_OBJECT && !a.object_value) || (a.kind == RV_ARRAY && !a.array_value);
-                int bn = (b.kind == RV_NULL) || (b.kind == RV_OBJECT && !b.object_value) || (b.kind == RV_ARRAY && !b.array_value);
+                int an = (a.kind == RV_NULL) || (a.kind == RV_OBJECT && !a.object_value) || (a.kind == RV_ARRAY && !a.array_value) || (a.kind == RV_LIST && !a.list_value);
+                int bn = (b.kind == RV_NULL) || (b.kind == RV_OBJECT && !b.object_value) || (b.kind == RV_ARRAY && !b.array_value) || (b.kind == RV_LIST && !b.list_value);
                 return rv_bool(an == bn);
             }
             if (a.kind == RV_OBJECT && b.kind == RV_OBJECT) return rv_bool(a.object_value == b.object_value);
             if (a.kind == RV_ARRAY && b.kind == RV_ARRAY) return rv_bool(a.array_value == b.array_value);
+            if (a.kind == RV_LIST && b.kind == RV_LIST) return rv_bool(a.list_value == b.list_value);
             if (a.kind == RV_STRING && b.kind == RV_STRING) {
                 const char *as = a.string_value ? a.string_value : "";
                 const char *bs = b.string_value ? b.string_value : "";
@@ -218,12 +279,13 @@ static RuntimeValue eval_binary(TokenKind op, RuntimeValue a, RuntimeValue b) {
             return rv_bool(ai == bi);
         case TOK_NEQ:
             if (a.kind == RV_NULL || b.kind == RV_NULL) {
-                int an = (a.kind == RV_NULL) || (a.kind == RV_OBJECT && !a.object_value) || (a.kind == RV_ARRAY && !a.array_value);
-                int bn = (b.kind == RV_NULL) || (b.kind == RV_OBJECT && !b.object_value) || (b.kind == RV_ARRAY && !b.array_value);
+                int an = (a.kind == RV_NULL) || (a.kind == RV_OBJECT && !a.object_value) || (a.kind == RV_ARRAY && !a.array_value) || (a.kind == RV_LIST && !a.list_value);
+                int bn = (b.kind == RV_NULL) || (b.kind == RV_OBJECT && !b.object_value) || (b.kind == RV_ARRAY && !b.array_value) || (b.kind == RV_LIST && !b.list_value);
                 return rv_bool(an != bn);
             }
             if (a.kind == RV_OBJECT && b.kind == RV_OBJECT) return rv_bool(a.object_value != b.object_value);
             if (a.kind == RV_ARRAY && b.kind == RV_ARRAY) return rv_bool(a.array_value != b.array_value);
+            if (a.kind == RV_LIST && b.kind == RV_LIST) return rv_bool(a.list_value != b.list_value);
             if (a.kind == RV_STRING && b.kind == RV_STRING) {
                 const char *as = a.string_value ? a.string_value : "";
                 const char *bs = b.string_value ? b.string_value : "";
@@ -253,6 +315,7 @@ static RuntimeValue call_method(ExecContext *ctx,
         else if (v.kind == RV_NULL) printf("null\n");
         else if (v.kind == RV_OBJECT) printf("<object %s>\n", v.object_value ? v.object_value->class_name : "null");
         else if (v.kind == RV_ARRAY) printf("<array len=%d>\n", v.array_value ? v.array_value->length : 0);
+        else if (v.kind == RV_LIST) printf("<list count=%d>\n", v.list_value ? v.list_value->count : 0);
         else printf("%d\n", v.int_value);
         return rv_void();
     }
@@ -281,10 +344,15 @@ static RuntimeValue call_method(ExecContext *ctx,
     int prev_return = ctx->did_return;
     int prev_break = ctx->did_break;
     int prev_continue = ctx->did_continue;
+    int prev_throw = ctx->did_throw;
+    int prev_has_active_exception = ctx->has_active_exception;
+    RuntimeValue prev_active_exception = ctx->active_exception;
     RuntimeValue prev_value = ctx->return_value;
+    RuntimeValue prev_thrown = ctx->thrown_value;
     ctx->did_return = 0;
     ctx->did_break = 0;
     ctx->did_continue = 0;
+    ctx->did_throw = 0;
     ctx->return_value = rv_void();
     const char *prev_class = ctx->current_class;
     ObjectInstance *prev_this = ctx->current_this;
@@ -294,12 +362,22 @@ static RuntimeValue call_method(ExecContext *ctx,
     exec_stmt(ctx, &local, m->body);
 
     RuntimeValue out = ctx->return_value;
-    if (!ctx->did_return && m->return_type.kind == TYPE_INT) out = rv_int(0);
+    if (!ctx->did_return) out = default_value_for_type(m->return_type);
+    int bubbled_throw = ctx->did_throw;
+    RuntimeValue bubbled_value = ctx->thrown_value;
 
     ctx->did_return = prev_return;
     ctx->did_break = prev_break;
     ctx->did_continue = prev_continue;
+    ctx->did_throw = prev_throw;
+    ctx->has_active_exception = prev_has_active_exception;
+    ctx->active_exception = prev_active_exception;
     ctx->return_value = prev_value;
+    ctx->thrown_value = prev_thrown;
+    if (bubbled_throw) {
+        ctx->did_throw = 1;
+        ctx->thrown_value = bubbled_value;
+    }
     ctx->current_class = prev_class;
     ctx->current_this = prev_this;
     return out;
@@ -341,6 +419,10 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
                     if (idx.int_value >= 0 && idx.int_value < arr.array_value->length) {
                         arr.array_value->items[idx.int_value] = v.int_value;
                     }
+                } else if (arr.kind == RV_LIST && arr.list_value && idx.kind == RV_INT) {
+                    if (idx.int_value >= 0 && idx.int_value < arr.list_value->count) {
+                        arr.list_value->items[idx.int_value] = v.int_value;
+                    }
                 }
             } else return rv_void();
             return v;
@@ -353,6 +435,20 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
         }
         case EXPR_BINARY: {
             RuntimeValue l = eval_expr(ctx, frame, e->as.binary.left);
+            if (e->as.binary.op == TOK_AND) {
+                if (!truthy(l)) return rv_bool(0);
+                RuntimeValue r = eval_expr(ctx, frame, e->as.binary.right);
+                return rv_bool(truthy(r));
+            }
+            if (e->as.binary.op == TOK_OR) {
+                if (truthy(l)) return rv_bool(1);
+                RuntimeValue r = eval_expr(ctx, frame, e->as.binary.right);
+                return rv_bool(truthy(r));
+            }
+            if (e->as.binary.op == TOK_COALESCE) {
+                if (l.kind != RV_NULL) return l;
+                return eval_expr(ctx, frame, e->as.binary.right);
+            }
             RuntimeValue r = eval_expr(ctx, frame, e->as.binary.right);
             return eval_binary(e->as.binary.op, l, r);
         }
@@ -366,6 +462,9 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
                 RuntimeValue obj = eval_expr(ctx, frame, e->as.member.object);
                 if (obj.kind == RV_ARRAY && strcmp(e->as.member.member, "Length") == 0) {
                     return rv_int(obj.array_value ? obj.array_value->length : 0);
+                }
+                if (obj.kind == RV_LIST && strcmp(e->as.member.member, "Count") == 0) {
+                    return rv_int(obj.list_value ? obj.list_value->count : 0);
                 }
                 if (obj.object_value) {
                     ObjectField *field = object_find_field(obj.object_value, e->as.member.member);
@@ -384,6 +483,24 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
                                        e->as.call.args,
                                        frame,
                                        obj.object_value);
+                }
+                if (obj.kind == RV_LIST && obj.list_value) {
+                    if (strcmp(callee->as.member.member, "Add") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue arg = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (arg.kind == RV_INT) {
+                            if (obj.list_value->count >= obj.list_value->capacity) {
+                                int new_cap = obj.list_value->capacity == 0 ? 4 : obj.list_value->capacity * 2;
+                                obj.list_value->items = realloc(obj.list_value->items, sizeof(int) * (size_t)new_cap);
+                                obj.list_value->capacity = new_cap;
+                            }
+                            obj.list_value->items[obj.list_value->count++] = arg.int_value;
+                        }
+                        return rv_void();
+                    }
+                    if (strcmp(callee->as.member.member, "Clear") == 0 && e->as.call.args.count == 0) {
+                        obj.list_value->count = 0;
+                        return rv_void();
+                    }
                 }
                 if (callee->as.member.object->kind == EXPR_IDENTIFIER) {
                     return call_method(ctx,
@@ -409,6 +526,10 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
                 arr->items = calloc((size_t)len, sizeof(int));
                 return rv_array(arr);
             }
+            if (strcmp(e->as.new_expr.class_name, "List") == 0) {
+                ListInstance *list = calloc(1, sizeof(ListInstance));
+                return rv_list(list);
+            }
             ObjectInstance *obj = create_object(ctx, e->as.new_expr.class_name);
             if (!obj) {
                 diag_report(ctx->diags, e->span, "clase no encontrada para new: %s", e->as.new_expr.class_name);
@@ -423,14 +544,23 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
                 idx.int_value >= 0 && idx.int_value < arr.array_value->length) {
                 return rv_int(arr.array_value->items[idx.int_value]);
             }
+            if (arr.kind == RV_LIST && arr.list_value && idx.kind == RV_INT &&
+                idx.int_value >= 0 && idx.int_value < arr.list_value->count) {
+                return rv_int(arr.list_value->items[idx.int_value]);
+            }
             return rv_int(0);
+        }
+        case EXPR_CONDITIONAL: {
+            RuntimeValue c = eval_expr(ctx, frame, e->as.conditional.condition);
+            if (truthy(c)) return eval_expr(ctx, frame, e->as.conditional.when_true);
+            return eval_expr(ctx, frame, e->as.conditional.when_false);
         }
     }
     return rv_void();
 }
 
 static void exec_stmt(ExecContext *ctx, Frame *frame, Stmt *s) {
-    if (ctx->did_return || ctx->did_break || ctx->did_continue) return;
+    if (ctx->did_return || ctx->did_break || ctx->did_continue || ctx->did_throw) return;
     switch (s->kind) {
         case STMT_BLOCK: {
             Frame inner;
@@ -547,6 +677,46 @@ static void exec_stmt(ExecContext *ctx, Frame *frame, Stmt *s) {
         case STMT_CONTINUE:
             ctx->did_continue = 1;
             break;
+        case STMT_THROW:
+            if (s->as.throw_expr) {
+                ctx->thrown_value = eval_expr(ctx, frame, s->as.throw_expr);
+            } else if (ctx->has_active_exception) {
+                ctx->thrown_value = ctx->active_exception;
+            } else {
+                diag_report(ctx->diags, s->span, "throw sin excepcion activa");
+                ctx->thrown_value = rv_null();
+            }
+            ctx->did_throw = 1;
+            break;
+        case STMT_TRY_CATCH: {
+            exec_stmt(ctx, frame, s->as.try_catch_stmt.try_block);
+            if (ctx->did_throw) {
+                RuntimeValue ex = ctx->thrown_value;
+                int handled = 0;
+                for (size_t i = 0; i < s->as.try_catch_stmt.catch_count; ++i) {
+                    CatchClause *cc = &s->as.try_catch_stmt.catches[i];
+                    if (cc->catch_name && !runtime_value_matches_type(ex, cc->catch_type)) continue;
+                    ctx->did_throw = 0;
+                    Frame catch_frame;
+                    frame_init(&catch_frame, frame);
+                    if (cc->catch_name) frame_define(&catch_frame, cc->catch_name, ex);
+                    int prev_has = ctx->has_active_exception;
+                    RuntimeValue prev_ex = ctx->active_exception;
+                    ctx->has_active_exception = 1;
+                    ctx->active_exception = ex;
+                    exec_stmt(ctx, &catch_frame, cc->catch_block);
+                    ctx->has_active_exception = prev_has;
+                    ctx->active_exception = prev_ex;
+                    handled = 1;
+                    break;
+                }
+                if (!handled) ctx->did_throw = 1;
+            }
+            if (s->as.try_catch_stmt.finally_block) {
+                exec_stmt(ctx, frame, s->as.try_catch_stmt.finally_block);
+            }
+            break;
+        }
     }
 }
 
@@ -635,7 +805,11 @@ static bool run_program(Program *program, DiagnosticList *diags) {
         .did_return = 0,
         .did_break = 0,
         .did_continue = 0,
+        .did_throw = 0,
         .return_value = rv_void(),
+        .thrown_value = rv_void(),
+        .active_exception = rv_void(),
+        .has_active_exception = 0,
         .current_class = "Program",
         .current_this = NULL
     };
@@ -645,6 +819,12 @@ static bool run_program(Program *program, DiagnosticList *diags) {
         return false;
     }
     call_method(&ctx, "Program", "Main", (ExprList){0}, NULL, NULL);
+    if (ctx.did_throw) {
+        char buf[64];
+        diag_report(diags, (Span){0}, "excepcion no capturada: %s",
+                    runtime_value_to_cstr(ctx.thrown_value, buf, sizeof(buf)));
+        return false;
+    }
     if (diag_has_errors(diags)) return false;
     return true;
 }
