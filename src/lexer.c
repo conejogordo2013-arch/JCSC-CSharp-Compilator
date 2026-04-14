@@ -18,13 +18,18 @@ static TokenKind keyword_kind(const char *lexeme) {
     if (strcmp(lexeme, "static") == 0) return TOK_KW_STATIC;
     if (strcmp(lexeme, "void") == 0) return TOK_KW_VOID;
     if (strcmp(lexeme, "int") == 0) return TOK_KW_INT;
+    if (strcmp(lexeme, "bool") == 0) return TOK_KW_BOOL;
     if (strcmp(lexeme, "string") == 0) return TOK_KW_STRING;
     if (strcmp(lexeme, "return") == 0) return TOK_KW_RETURN;
     if (strcmp(lexeme, "if") == 0) return TOK_KW_IF;
     if (strcmp(lexeme, "else") == 0) return TOK_KW_ELSE;
     if (strcmp(lexeme, "for") == 0) return TOK_KW_FOR;
     if (strcmp(lexeme, "while") == 0) return TOK_KW_WHILE;
+    if (strcmp(lexeme, "break") == 0) return TOK_KW_BREAK;
+    if (strcmp(lexeme, "continue") == 0) return TOK_KW_CONTINUE;
     if (strcmp(lexeme, "new") == 0) return TOK_KW_NEW;
+    if (strcmp(lexeme, "true") == 0) return TOK_KW_TRUE;
+    if (strcmp(lexeme, "false") == 0) return TOK_KW_FALSE;
     return TOK_IDENTIFIER;
 }
 

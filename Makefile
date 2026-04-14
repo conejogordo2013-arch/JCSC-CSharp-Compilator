@@ -15,4 +15,7 @@ jccsc: $(OBJ)
 clean:
 	rm -f src/*.o jccsc
 
-.PHONY: all clean
+test: jccsc
+	./tests/run_tests.sh
+
+.PHONY: all clean test
