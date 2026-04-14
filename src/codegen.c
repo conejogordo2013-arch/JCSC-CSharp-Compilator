@@ -458,6 +458,8 @@ static void exec_stmt(ExecContext *ctx, Frame *frame, Stmt *s) {
                     continue;
                 }
             }
+            if (!matched && s->as.switch_stmt.default_body) exec_stmt(ctx, frame, s->as.switch_stmt.default_body);
+            if (ctx->did_break) ctx->did_break = 0;
             break;
         }
         case STMT_FOREACH: {
