@@ -7,6 +7,8 @@ const char *token_kind_name(TokenKind kind) {
         case TOK_INT_LITERAL: return "int_literal";
         case TOK_STRING_LITERAL: return "string_literal";
         case TOK_KW_CLASS: return "class";
+        case TOK_KW_STRUCT: return "struct";
+        case TOK_KW_INTERFACE: return "interface";
         case TOK_KW_USING: return "using";
         case TOK_KW_NAMESPACE: return "namespace";
         case TOK_KW_PUBLIC: return "public";
@@ -33,6 +35,13 @@ const char *token_kind_name(TokenKind kind) {
         case TOK_KW_TRUE: return "true";
         case TOK_KW_FALSE: return "false";
         case TOK_KW_NULL: return "null";
+        case TOK_PLUS_ASSIGN: return "+=";
+        case TOK_MINUS_ASSIGN: return "-=";
+        case TOK_STAR_ASSIGN: return "*=";
+        case TOK_SLASH_ASSIGN: return "/=";
+        case TOK_PERCENT_ASSIGN: return "%=";
+        case TOK_PLUS_PLUS: return "++";
+        case TOK_MINUS_MINUS: return "--";
         case TOK_LBRACKET: return "[";
         case TOK_RBRACKET: return "]";
         case TOK_COLON: return ":";

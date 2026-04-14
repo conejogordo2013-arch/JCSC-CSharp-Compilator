@@ -42,13 +42,17 @@ Incluye una batería amplia de tests de éxito y error bajo `tests/cases`.
 
 - Tipos básicos: `int`, `bool`, `string`, `void`
 - Clases y métodos estáticos
+- Sobrecarga de métodos por cantidad y tipos de parámetros (int/bool/string/arrays/clases por nombre exacto)
 - Variables, `if/else`, `while`, `do/while`, `for`, `switch`, `return`, `break`, `continue`
 - `using` y bloque `namespace ... { ... }`
 - Objetos por referencia con `new`, campos y metodos de instancia basicos
+- Declaraciones `struct` básicas (tratadas con semántica de objeto en runtime actual)
+- Declaraciones `interface` básicas (firmas + `class : Interface` parseable)
 - Arrays `int[]`, `new int[n]` e indexación `a[i]`
 - `foreach (int x in arr)` sobre `int[]`
 - Propiedad `arr.Length` para arrays
 - Expresiones aritméticas y lógicas
+- Operadores de actualización/asignación: `++`, `--`, `+=`, `-=`, `*=`, `/=`, `%=`
 - Literales booleanos: `true`, `false`
 - Literal `null` para tipos por referencia (`class`, `int[]`) y comparaciones `==`/`!=`
 - Built-in: `Console.WriteLine(...)`

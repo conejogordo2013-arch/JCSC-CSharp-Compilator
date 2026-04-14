@@ -112,15 +112,51 @@ static void frame_assign(Frame *f, const char *name, RuntimeValue v) {
     frame_define(f, name, v);
 }
 
-static MethodDecl *find_method(ExecContext *ctx, const char *class_name, const char *method_name) {
+static int runtime_value_matches_type(RuntimeValue v, TypeRef t) {
+    if (t.kind == TYPE_INT) return v.kind == RV_INT;
+    if (t.kind == TYPE_BOOL) return v.kind == RV_BOOL;
+    if (t.kind == TYPE_STRING) return v.kind == RV_STRING || v.kind == RV_NULL;
+    if (t.kind == TYPE_CLASS) {
+        if (v.kind == RV_NULL) return 1;
+        if (t.name && strcmp(t.name, "int[]") == 0) return v.kind == RV_ARRAY;
+        if (v.kind != RV_OBJECT || !v.object_value) return 0;
+        if (!t.name) return 1;
+        return strcmp(v.object_value->class_name, t.name) == 0;
+    }
+    return 1;
+}
+
+static MethodDecl *find_method(ExecContext *ctx,
+                               const char *class_name,
+                               const char *method_name,
+                               RuntimeValue *args,
+                               size_t arg_count) {
+    MethodDecl *best = NULL;
+    int best_score = -1;
     for (size_t ci = 0; ci < ctx->program->class_count; ++ci) {
         ClassDecl *c = &ctx->program->classes[ci];
         if (strcmp(c->name, class_name) != 0) continue;
         for (size_t mi = 0; mi < c->method_count; ++mi) {
-            if (strcmp(c->methods[mi].name, method_name) == 0) return &c->methods[mi];
+            MethodDecl *candidate = &c->methods[mi];
+            if (strcmp(candidate->name, method_name) != 0) continue;
+            if (candidate->param_count != arg_count) continue;
+            int score = 0;
+            int ok = 1;
+            for (size_t pi = 0; pi < arg_count; ++pi) {
+                if (!runtime_value_matches_type(args[pi], candidate->params[pi].type)) {
+                    ok = 0;
+                    break;
+                }
+                score++;
+            }
+            if (!ok) continue;
+            if (score > best_score) {
+                best = candidate;
+                best_score = score;
+            }
         }
     }
-    return NULL;
+    return best;
 }
 
 static ClassDecl *find_class(ExecContext *ctx, const char *class_name) {
@@ -221,17 +257,25 @@ static RuntimeValue call_method(ExecContext *ctx,
         return rv_void();
     }
 
-    MethodDecl *m = find_method(ctx, class_name, method_name);
+    RuntimeValue eval_args[64];
+    if (args.count > 64) {
+        diag_report(ctx->diags, (Span){0}, "demasiados argumentos para llamada a %s.%s", class_name, method_name);
+        return rv_void();
+    }
+    for (size_t i = 0; i < args.count; ++i) eval_args[i] = eval_expr(ctx, caller, args.items[i]);
+
+    MethodDecl *m = find_method(ctx, class_name, method_name, eval_args, args.count);
     if (!m) {
-        diag_report(ctx->diags, (Span){0}, "metodo no encontrado: %s.%s", class_name, method_name);
+        diag_report(ctx->diags, (Span){0},
+                    "no existe sobrecarga compatible para %s.%s con %zu argumento(s)",
+                    class_name, method_name, args.count);
         return rv_void();
     }
 
     Frame local;
     frame_init(&local, NULL);
     for (size_t i = 0; i < m->param_count && i < args.count; ++i) {
-        RuntimeValue arg = eval_expr(ctx, caller, args.items[i]);
-        frame_define(&local, m->params[i].name, arg);
+        frame_define(&local, m->params[i].name, eval_args[i]);
     }
 
     int prev_return = ctx->did_return;
@@ -458,8 +502,6 @@ static void exec_stmt(ExecContext *ctx, Frame *frame, Stmt *s) {
                     continue;
                 }
             }
-            if (!matched && s->as.switch_stmt.default_body) exec_stmt(ctx, frame, s->as.switch_stmt.default_body);
-            if (ctx->did_break) ctx->did_break = 0;
             break;
         }
         case STMT_FOREACH: {
@@ -597,12 +639,13 @@ static bool run_program(Program *program, DiagnosticList *diags) {
         .current_class = "Program",
         .current_this = NULL
     };
-    MethodDecl *entry = find_method(&ctx, "Program", "Main");
+    MethodDecl *entry = find_method(&ctx, "Program", "Main", NULL, 0);
     if (!entry) {
         diag_report(diags, (Span){0}, "no se encontro Program.Main() como punto de entrada");
         return false;
     }
     call_method(&ctx, "Program", "Main", (ExprList){0}, NULL, NULL);
+    if (diag_has_errors(diags)) return false;
     return true;
 }
 

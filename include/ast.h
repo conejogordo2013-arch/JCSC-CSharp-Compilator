@@ -181,6 +181,7 @@ typedef struct FieldDecl {
 
 typedef struct ClassDecl {
     const char *name;
+    bool is_struct;
     MethodDecl *methods;
     size_t method_count;
     FieldDecl *fields;
