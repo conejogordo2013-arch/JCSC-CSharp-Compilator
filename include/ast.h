@@ -7,6 +7,7 @@
 
 typedef enum TypeKind {
     TYPE_INT,
+    TYPE_BOOL,
     TYPE_STRING,
     TYPE_VOID,
     TYPE_CLASS,
@@ -20,6 +21,7 @@ typedef struct TypeRef {
 
 typedef enum ExprKind {
     EXPR_INT,
+    EXPR_BOOL,
     EXPR_STRING,
     EXPR_IDENTIFIER,
     EXPR_BINARY,
@@ -27,10 +29,13 @@ typedef enum ExprKind {
     EXPR_CALL,
     EXPR_MEMBER,
     EXPR_ASSIGN,
+    EXPR_NEW,
+    EXPR_INDEX,
 } ExprKind;
 
 typedef struct Expr Expr;
 typedef struct Stmt Stmt;
+typedef struct SwitchCase SwitchCase;
 
 typedef struct ExprList {
     Expr **items;
@@ -43,6 +48,7 @@ struct Expr {
     TypeRef inferred_type;
     union {
         int int_value;
+        bool bool_value;
         const char *string_value;
         const char *identifier;
         struct {
@@ -66,6 +72,15 @@ struct Expr {
             Expr *target;
             Expr *value;
         } assign;
+        struct {
+            const char *class_name;
+            Expr *array_size_expr;
+            bool is_int_array;
+        } new_expr;
+        struct {
+            Expr *array;
+            Expr *index;
+        } index;
     } as;
 };
 
@@ -75,8 +90,12 @@ typedef enum StmtKind {
     STMT_EXPR,
     STMT_IF,
     STMT_WHILE,
+    STMT_DO_WHILE,
     STMT_FOR,
+    STMT_SWITCH,
     STMT_RETURN,
+    STMT_BREAK,
+    STMT_CONTINUE,
 } StmtKind;
 
 typedef struct StmtList {
@@ -105,13 +124,28 @@ struct Stmt {
             Stmt *body;
         } while_stmt;
         struct {
+            Stmt *body;
+            Expr *condition;
+        } do_while_stmt;
+        struct {
             Stmt *initializer;
             Expr *condition;
             Expr *increment;
             Stmt *body;
         } for_stmt;
+        struct {
+            Expr *expr;
+            SwitchCase *cases;
+            size_t case_count;
+            Stmt *default_body;
+        } switch_stmt;
         Expr *return_expr;
     } as;
+};
+
+struct SwitchCase {
+    int value;
+    Stmt *body;
 };
 
 typedef struct Param {
