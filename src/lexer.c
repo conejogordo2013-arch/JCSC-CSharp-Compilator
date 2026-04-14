@@ -13,18 +13,32 @@ static char *slice_dup(const char *src, int start, int len) {
 
 static TokenKind keyword_kind(const char *lexeme) {
     if (strcmp(lexeme, "class") == 0) return TOK_KW_CLASS;
+    if (strcmp(lexeme, "using") == 0) return TOK_KW_USING;
+    if (strcmp(lexeme, "namespace") == 0) return TOK_KW_NAMESPACE;
     if (strcmp(lexeme, "public") == 0) return TOK_KW_PUBLIC;
     if (strcmp(lexeme, "private") == 0) return TOK_KW_PRIVATE;
     if (strcmp(lexeme, "static") == 0) return TOK_KW_STATIC;
     if (strcmp(lexeme, "void") == 0) return TOK_KW_VOID;
     if (strcmp(lexeme, "int") == 0) return TOK_KW_INT;
+    if (strcmp(lexeme, "bool") == 0) return TOK_KW_BOOL;
     if (strcmp(lexeme, "string") == 0) return TOK_KW_STRING;
     if (strcmp(lexeme, "return") == 0) return TOK_KW_RETURN;
     if (strcmp(lexeme, "if") == 0) return TOK_KW_IF;
     if (strcmp(lexeme, "else") == 0) return TOK_KW_ELSE;
     if (strcmp(lexeme, "for") == 0) return TOK_KW_FOR;
+    if (strcmp(lexeme, "foreach") == 0) return TOK_KW_FOREACH;
+    if (strcmp(lexeme, "in") == 0) return TOK_KW_IN;
     if (strcmp(lexeme, "while") == 0) return TOK_KW_WHILE;
+    if (strcmp(lexeme, "do") == 0) return TOK_KW_DO;
+    if (strcmp(lexeme, "switch") == 0) return TOK_KW_SWITCH;
+    if (strcmp(lexeme, "case") == 0) return TOK_KW_CASE;
+    if (strcmp(lexeme, "default") == 0) return TOK_KW_DEFAULT;
+    if (strcmp(lexeme, "break") == 0) return TOK_KW_BREAK;
+    if (strcmp(lexeme, "continue") == 0) return TOK_KW_CONTINUE;
     if (strcmp(lexeme, "new") == 0) return TOK_KW_NEW;
+    if (strcmp(lexeme, "true") == 0) return TOK_KW_TRUE;
+    if (strcmp(lexeme, "false") == 0) return TOK_KW_FALSE;
+    if (strcmp(lexeme, "null") == 0) return TOK_KW_NULL;
     return TOK_IDENTIFIER;
 }
 
@@ -95,7 +109,10 @@ void lex_source(const char *source, Vector *tokens, DiagnosticList *diags) {
             P1(')', TOK_RPAREN)
             P1('{', TOK_LBRACE)
             P1('}', TOK_RBRACE)
+            P1('[', TOK_LBRACKET)
+            P1(']', TOK_RBRACKET)
             P1(';', TOK_SEMI)
+            P1(':', TOK_COLON)
             P1(',', TOK_COMMA)
             P1('.', TOK_DOT)
             P1('+', TOK_PLUS)
