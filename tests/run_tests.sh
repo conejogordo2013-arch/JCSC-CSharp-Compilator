@@ -243,6 +243,7 @@ run_pass "linq_advanced_stats" "16"
 run_pass "list_remove_ops" "5"
 run_pass "list_insert_toarray" "6"
 run_pass "linq_sequence_ops" "12"
+run_pass "complex_showcase" $'capturado:ok\nfinally\npower\n10\n97'
 
 # NATIVE BACKEND TARGET CASES (4)
 run_native_target "x86_64"

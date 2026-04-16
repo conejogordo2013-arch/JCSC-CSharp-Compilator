@@ -188,6 +188,7 @@ static int runtime_value_matches_type(ExecContext *ctx, RuntimeValue v, TypeRef 
     if (t.kind == TYPE_CLASS) {
         if (v.kind == RV_NULL) return 1;
         if (t.name && strcmp(t.name, "int[]") == 0) return v.kind == RV_ARRAY;
+        if (t.name && strcmp(t.name, "List") == 0) return v.kind == RV_LIST;
         if (v.kind != RV_OBJECT || !v.object_value) return 0;
         if (!t.name) return 1;
         return runtime_class_assignable_to(ctx, v.object_value->class_name, t.name, 0);
