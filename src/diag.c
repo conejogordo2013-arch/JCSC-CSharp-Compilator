@@ -22,6 +22,8 @@ void diag_init(DiagnosticList *list) {
 }
 
 void diag_report(DiagnosticList *list, Span span, const char *fmt, ...) {
+    const size_t max_diags = 512;
+    if (list->count >= max_diags) return;
     if (list->count == list->capacity) {
         size_t new_cap = list->capacity == 0 ? 8 : list->capacity * 2;
         list->items = realloc(list->items, new_cap * sizeof(Diagnostic));
@@ -31,6 +33,16 @@ void diag_report(DiagnosticList *list, Span span, const char *fmt, ...) {
     va_start(ap, fmt);
     char *msg = dup_vprintf(fmt, ap);
     va_end(ap);
+
+    if (list->count > 0) {
+        Diagnostic *last = &list->items[list->count - 1];
+        if (last->span.line == span.line &&
+            last->span.column == span.column &&
+            strcmp(last->message, msg) == 0) {
+            free(msg);
+            return;
+        }
+    }
 
     list->items[list->count++] = (Diagnostic){.span = span, .message = msg};
 }

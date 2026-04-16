@@ -205,6 +205,8 @@ typedef struct FieldDecl {
 typedef struct ClassDecl {
     const char *name;
     bool is_struct;
+    const char **base_types;
+    size_t base_type_count;
     MethodDecl *methods;
     size_t method_count;
     FieldDecl *fields;
@@ -212,7 +214,14 @@ typedef struct ClassDecl {
     Span span;
 } ClassDecl;
 
+typedef struct InterfaceDecl {
+    const char *name;
+    Span span;
+} InterfaceDecl;
+
 typedef struct Program {
+    InterfaceDecl *interfaces;
+    size_t interface_count;
     ClassDecl *classes;
     size_t class_count;
 } Program;

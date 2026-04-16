@@ -70,6 +70,7 @@ typedef struct ExecContext {
     int has_active_exception;
     const char *current_class;
     ObjectInstance *current_this;
+    int debug_trace;
 } ExecContext;
 
 static void frame_init(Frame *f, Frame *parent) { f->count = 0; f->parent = parent; }
@@ -159,53 +160,6 @@ static void frame_assign(Frame *f, const char *name, RuntimeValue v) {
     frame_define(f, name, v);
 }
 
-static int runtime_value_matches_type(RuntimeValue v, TypeRef t) {
-    if (t.kind == TYPE_INT) return v.kind == RV_INT;
-    if (t.kind == TYPE_BOOL) return v.kind == RV_BOOL;
-    if (t.kind == TYPE_STRING) return v.kind == RV_STRING || v.kind == RV_NULL;
-    if (t.kind == TYPE_CLASS) {
-        if (v.kind == RV_NULL) return 1;
-        if (t.name && strcmp(t.name, "int[]") == 0) return v.kind == RV_ARRAY;
-        if (v.kind != RV_OBJECT || !v.object_value) return 0;
-        if (!t.name) return 1;
-        return strcmp(v.object_value->class_name, t.name) == 0;
-    }
-    return 1;
-}
-
-static MethodDecl *find_method(ExecContext *ctx,
-                               const char *class_name,
-                               const char *method_name,
-                               RuntimeValue *args,
-                               size_t arg_count) {
-    MethodDecl *best = NULL;
-    int best_score = -1;
-    for (size_t ci = 0; ci < ctx->program->class_count; ++ci) {
-        ClassDecl *c = &ctx->program->classes[ci];
-        if (strcmp(c->name, class_name) != 0) continue;
-        for (size_t mi = 0; mi < c->method_count; ++mi) {
-            MethodDecl *candidate = &c->methods[mi];
-            if (strcmp(candidate->name, method_name) != 0) continue;
-            if (candidate->param_count != arg_count) continue;
-            int score = 0;
-            int ok = 1;
-            for (size_t pi = 0; pi < arg_count; ++pi) {
-                if (!runtime_value_matches_type(args[pi], candidate->params[pi].type)) {
-                    ok = 0;
-                    break;
-                }
-                score++;
-            }
-            if (!ok) continue;
-            if (score > best_score) {
-                best = candidate;
-                best_score = score;
-            }
-        }
-    }
-    return best;
-}
-
 static ClassDecl *find_class(ExecContext *ctx, const char *class_name) {
     for (size_t ci = 0; ci < ctx->program->class_count; ++ci) {
         ClassDecl *c = &ctx->program->classes[ci];
@@ -214,16 +168,99 @@ static ClassDecl *find_class(ExecContext *ctx, const char *class_name) {
     return NULL;
 }
 
+static int runtime_class_assignable_to(ExecContext *ctx, const char *from_class, const char *to_class, int depth) {
+    if (!from_class || !to_class || depth > 32) return 0;
+    if (strcmp(from_class, to_class) == 0) return 1;
+    ClassDecl *decl = find_class(ctx, from_class);
+    if (!decl) return 0;
+    for (size_t i = 0; i < decl->base_type_count; ++i) {
+        const char *base = decl->base_types[i];
+        if (strcmp(base, to_class) == 0) return 1;
+        if (find_class(ctx, base) && runtime_class_assignable_to(ctx, base, to_class, depth + 1)) return 1;
+    }
+    return 0;
+}
+
+static int runtime_value_matches_type(ExecContext *ctx, RuntimeValue v, TypeRef t) {
+    if (t.kind == TYPE_INT) return v.kind == RV_INT;
+    if (t.kind == TYPE_BOOL) return v.kind == RV_BOOL;
+    if (t.kind == TYPE_STRING) return v.kind == RV_STRING || v.kind == RV_NULL;
+    if (t.kind == TYPE_CLASS) {
+        if (v.kind == RV_NULL) return 1;
+        if (t.name && strcmp(t.name, "int[]") == 0) return v.kind == RV_ARRAY;
+        if (v.kind != RV_OBJECT || !v.object_value) return 0;
+        if (!t.name) return 1;
+        return runtime_class_assignable_to(ctx, v.object_value->class_name, t.name, 0);
+    }
+    return 1;
+}
+
+static MethodDecl *find_method_in_class(ExecContext *ctx,
+                                        ClassDecl *c,
+                                        const char *method_name,
+                                        RuntimeValue *args,
+                                        size_t arg_count) {
+    MethodDecl *best = NULL;
+    int best_score = -1;
+    for (size_t mi = 0; mi < c->method_count; ++mi) {
+        MethodDecl *candidate = &c->methods[mi];
+        if (strcmp(candidate->name, method_name) != 0) continue;
+        if (candidate->param_count != arg_count) continue;
+        int score = 0;
+        int ok = 1;
+        for (size_t pi = 0; pi < arg_count; ++pi) {
+            if (!runtime_value_matches_type(ctx, args[pi], candidate->params[pi].type)) {
+                ok = 0;
+                break;
+            }
+            score++;
+        }
+        if (!ok) continue;
+        if (score > best_score) {
+            best = candidate;
+            best_score = score;
+        }
+    }
+    return best;
+}
+
+static MethodDecl *find_method(ExecContext *ctx,
+                               const char *class_name,
+                               const char *method_name,
+                               RuntimeValue *args,
+                               size_t arg_count) {
+    ClassDecl *c = find_class(ctx, class_name);
+    if (!c) return NULL;
+    MethodDecl *m = find_method_in_class(ctx, c, method_name, args, arg_count);
+    if (m) return m;
+    for (size_t i = 0; i < c->base_type_count; ++i) {
+        ClassDecl *base = find_class(ctx, c->base_types[i]);
+        if (!base) continue;
+        m = find_method_in_class(ctx, base, method_name, args, arg_count);
+        if (m) return m;
+    }
+    return NULL;
+}
+
+static void init_fields_from_class(ObjectInstance *obj, ClassDecl *c) {
+    if (!obj || !c) return;
+    for (size_t i = 0; i < c->field_count && obj->field_count < 256; ++i) {
+        RuntimeValue init = rv_int(0);
+        if (c->fields[i].type.kind == TYPE_CLASS) init = rv_null();
+        obj->fields[obj->field_count++] = (ObjectField){.name = c->fields[i].name, .value = init};
+    }
+}
+
 static ObjectInstance *create_object(ExecContext *ctx, const char *class_name) {
     ClassDecl *c = find_class(ctx, class_name);
     if (!c) return NULL;
     ObjectInstance *obj = calloc(1, sizeof(ObjectInstance));
     obj->class_name = class_name;
-    for (size_t i = 0; i < c->field_count && i < 256; ++i) {
-        RuntimeValue init = rv_int(0);
-        if (c->fields[i].type.kind == TYPE_CLASS) init = rv_null();
-        obj->fields[obj->field_count++] = (ObjectField){.name = c->fields[i].name, .value = init};
+    for (size_t i = 0; i < c->base_type_count; ++i) {
+        ClassDecl *base = find_class(ctx, c->base_types[i]);
+        if (base) init_fields_from_class(obj, base);
     }
+    init_fields_from_class(obj, c);
     return obj;
 }
 
@@ -307,7 +344,11 @@ static RuntimeValue call_method(ExecContext *ctx,
                                 const char *method_name,
                                 ExprList args,
                                 Frame *caller,
-                                ObjectInstance *this_obj) {
+                                ObjectInstance *this_obj,
+                                Span call_span) {
+    if (ctx->debug_trace) {
+        fprintf(stderr, "[trace] call %s.%s(%zu)\n", class_name, method_name, args.count);
+    }
     if (strcmp(class_name, "Console") == 0 && strcmp(method_name, "WriteLine") == 0 && args.count == 1) {
         RuntimeValue v = eval_expr(ctx, caller, args.items[0]);
         if (v.kind == RV_STRING) printf("%s\n", v.string_value ? v.string_value : "");
@@ -322,14 +363,14 @@ static RuntimeValue call_method(ExecContext *ctx,
 
     RuntimeValue eval_args[64];
     if (args.count > 64) {
-        diag_report(ctx->diags, (Span){0}, "demasiados argumentos para llamada a %s.%s", class_name, method_name);
+        diag_report(ctx->diags, call_span, "demasiados argumentos para llamada a %s.%s", class_name, method_name);
         return rv_void();
     }
     for (size_t i = 0; i < args.count; ++i) eval_args[i] = eval_expr(ctx, caller, args.items[i]);
 
     MethodDecl *m = find_method(ctx, class_name, method_name, eval_args, args.count);
     if (!m) {
-        diag_report(ctx->diags, (Span){0},
+        diag_report(ctx->diags, call_span,
                     "no existe sobrecarga compatible para %s.%s con %zu argumento(s)",
                     class_name, method_name, args.count);
         return rv_void();
@@ -415,14 +456,22 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
             } else if (e->as.assign.target->kind == EXPR_INDEX) {
                 RuntimeValue arr = eval_expr(ctx, frame, e->as.assign.target->as.index.array);
                 RuntimeValue idx = eval_expr(ctx, frame, e->as.assign.target->as.index.index);
-                if (arr.kind == RV_ARRAY && arr.array_value && idx.kind == RV_INT) {
+                if (idx.kind != RV_INT) {
+                    diag_report(ctx->diags, e->span, "indice de asignacion debe ser int");
+                } else if (arr.kind == RV_ARRAY && arr.array_value) {
                     if (idx.int_value >= 0 && idx.int_value < arr.array_value->length) {
                         arr.array_value->items[idx.int_value] = v.int_value;
+                    } else {
+                        diag_report(ctx->diags, e->span, "asignacion fuera de rango en array");
                     }
-                } else if (arr.kind == RV_LIST && arr.list_value && idx.kind == RV_INT) {
+                } else if (arr.kind == RV_LIST && arr.list_value) {
                     if (idx.int_value >= 0 && idx.int_value < arr.list_value->count) {
                         arr.list_value->items[idx.int_value] = v.int_value;
+                    } else {
+                        diag_report(ctx->diags, e->span, "asignacion fuera de rango en List");
                     }
+                } else {
+                    diag_report(ctx->diags, e->span, "asignacion indexada requiere array o List");
                 }
             } else return rv_void();
             return v;
@@ -450,6 +499,14 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
                 return eval_expr(ctx, frame, e->as.binary.right);
             }
             RuntimeValue r = eval_expr(ctx, frame, e->as.binary.right);
+            if (e->as.binary.op == TOK_SLASH && r.kind == RV_INT && r.int_value == 0) {
+                diag_report(ctx->diags, e->span, "division por cero");
+                return rv_int(0);
+            }
+            if (e->as.binary.op == TOK_PERCENT && r.kind == RV_INT && r.int_value == 0) {
+                diag_report(ctx->diags, e->span, "modulo por cero");
+                return rv_int(0);
+            }
             return eval_binary(e->as.binary.op, l, r);
         }
         case EXPR_MEMBER:
@@ -470,6 +527,11 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
                     ObjectField *field = object_find_field(obj.object_value, e->as.member.member);
                     if (field) return field->value;
                 }
+                if (obj.kind == RV_NULL) {
+                    diag_report(ctx->diags, e->span, "acceso a miembro sobre null");
+                } else {
+                    diag_report(ctx->diags, e->span, "miembro no encontrado: %s", e->as.member.member);
+                }
                 return rv_void();
             }
         case EXPR_CALL: {
@@ -482,7 +544,8 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
                                        callee->as.member.member,
                                        e->as.call.args,
                                        frame,
-                                       obj.object_value);
+                                       obj.object_value,
+                                       e->span);
                 }
                 if (obj.kind == RV_LIST && obj.list_value) {
                     if (strcmp(callee->as.member.member, "Add") == 0 && e->as.call.args.count == 1) {
@@ -501,6 +564,368 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
                         obj.list_value->count = 0;
                         return rv_void();
                     }
+                    if (strcmp(callee->as.member.member, "Where") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue arg = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (arg.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "Where requiere argumento int");
+                            return rv_list(calloc(1, sizeof(ListInstance)));
+                        }
+                        ListInstance *out = calloc(1, sizeof(ListInstance));
+                        for (int i = 0; i < obj.list_value->count; ++i) {
+                            if (obj.list_value->items[i] >= arg.int_value) {
+                                if (out->count >= out->capacity) {
+                                    int new_cap = out->capacity == 0 ? 4 : out->capacity * 2;
+                                    out->items = realloc(out->items, sizeof(int) * (size_t)new_cap);
+                                    out->capacity = new_cap;
+                                }
+                                out->items[out->count++] = obj.list_value->items[i];
+                            }
+                        }
+                        return rv_list(out);
+                    }
+                    if (strcmp(callee->as.member.member, "Select") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue arg = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (arg.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "Select requiere argumento int");
+                            return rv_list(calloc(1, sizeof(ListInstance)));
+                        }
+                        ListInstance *out = calloc(1, sizeof(ListInstance));
+                        out->count = obj.list_value->count;
+                        out->capacity = out->count;
+                        if (out->count > 0) out->items = calloc((size_t)out->count, sizeof(int));
+                        for (int i = 0; i < obj.list_value->count; ++i) out->items[i] = obj.list_value->items[i] + arg.int_value;
+                        return rv_list(out);
+                    }
+                    if (strcmp(callee->as.member.member, "FirstOrDefault") == 0 && e->as.call.args.count == 0) {
+                        if (obj.list_value->count == 0) return rv_int(0);
+                        return rv_int(obj.list_value->items[0]);
+                    }
+                    if (strcmp(callee->as.member.member, "LastOrDefault") == 0 && e->as.call.args.count == 0) {
+                        if (obj.list_value->count == 0) return rv_int(0);
+                        return rv_int(obj.list_value->items[obj.list_value->count - 1]);
+                    }
+                    if (strcmp(callee->as.member.member, "ElementAtOrDefault") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue idx = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (idx.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "ElementAtOrDefault requiere argumento int");
+                            return rv_int(0);
+                        }
+                        if (idx.int_value < 0 || idx.int_value >= obj.list_value->count) return rv_int(0);
+                        return rv_int(obj.list_value->items[idx.int_value]);
+                    }
+                    if (strcmp(callee->as.member.member, "Sum") == 0 && e->as.call.args.count == 0) {
+                        int total = 0;
+                        for (int i = 0; i < obj.list_value->count; ++i) total += obj.list_value->items[i];
+                        return rv_int(total);
+                    }
+                    if (strcmp(callee->as.member.member, "Count") == 0 && e->as.call.args.count == 0) {
+                        return rv_int(obj.list_value->count);
+                    }
+                    if (strcmp(callee->as.member.member, "Any") == 0 && e->as.call.args.count == 0) {
+                        return rv_bool(obj.list_value->count > 0);
+                    }
+                    if (strcmp(callee->as.member.member, "All") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue arg = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (arg.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "All requiere argumento int");
+                            return rv_bool(0);
+                        }
+                        for (int i = 0; i < obj.list_value->count; ++i) {
+                            if (obj.list_value->items[i] < arg.int_value) return rv_bool(0);
+                        }
+                        return rv_bool(1);
+                    }
+                    if (strcmp(callee->as.member.member, "Distinct") == 0 && e->as.call.args.count == 0) {
+                        ListInstance *out = calloc(1, sizeof(ListInstance));
+                        for (int i = 0; i < obj.list_value->count; ++i) {
+                            int v = obj.list_value->items[i];
+                            int seen = 0;
+                            for (int j = 0; j < out->count; ++j) if (out->items[j] == v) { seen = 1; break; }
+                            if (seen) continue;
+                            if (out->count >= out->capacity) {
+                                int new_cap = out->capacity == 0 ? 4 : out->capacity * 2;
+                                out->items = realloc(out->items, sizeof(int) * (size_t)new_cap);
+                                out->capacity = new_cap;
+                            }
+                            out->items[out->count++] = v;
+                        }
+                        return rv_list(out);
+                    }
+                    if (strcmp(callee->as.member.member, "OrderBy") == 0 && e->as.call.args.count == 0) {
+                        ListInstance *out = calloc(1, sizeof(ListInstance));
+                        out->count = obj.list_value->count;
+                        out->capacity = out->count;
+                        if (out->count > 0) out->items = calloc((size_t)out->count, sizeof(int));
+                        for (int i = 0; i < out->count; ++i) out->items[i] = obj.list_value->items[i];
+                        for (int i = 0; i < out->count; ++i) {
+                            for (int j = i + 1; j < out->count; ++j) {
+                                if (out->items[j] < out->items[i]) {
+                                    int tmp = out->items[i];
+                                    out->items[i] = out->items[j];
+                                    out->items[j] = tmp;
+                                }
+                            }
+                        }
+                        return rv_list(out);
+                    }
+                    if (strcmp(callee->as.member.member, "Reverse") == 0 && e->as.call.args.count == 0) {
+                        ListInstance *out = calloc(1, sizeof(ListInstance));
+                        out->count = obj.list_value->count;
+                        out->capacity = out->count;
+                        if (out->count > 0) out->items = calloc((size_t)out->count, sizeof(int));
+                        for (int i = 0; i < out->count; ++i) out->items[i] = obj.list_value->items[out->count - i - 1];
+                        return rv_list(out);
+                    }
+                    if (strcmp(callee->as.member.member, "Contains") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue arg = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (arg.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "Contains requiere argumento int");
+                            return rv_bool(0);
+                        }
+                        for (int i = 0; i < obj.list_value->count; ++i) {
+                            if (obj.list_value->items[i] == arg.int_value) return rv_bool(1);
+                        }
+                        return rv_bool(0);
+                    }
+                    if (strcmp(callee->as.member.member, "Remove") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue arg = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (arg.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "Remove requiere argumento int");
+                            return rv_bool(0);
+                        }
+                        for (int i = 0; i < obj.list_value->count; ++i) {
+                            if (obj.list_value->items[i] == arg.int_value) {
+                                for (int j = i; j + 1 < obj.list_value->count; ++j) obj.list_value->items[j] = obj.list_value->items[j + 1];
+                                obj.list_value->count--;
+                                return rv_bool(1);
+                            }
+                        }
+                        return rv_bool(0);
+                    }
+                    if (strcmp(callee->as.member.member, "RemoveAt") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue arg = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (arg.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "RemoveAt requiere argumento int");
+                            return rv_void();
+                        }
+                        if (arg.int_value < 0 || arg.int_value >= obj.list_value->count) {
+                            diag_report(ctx->diags, e->span, "RemoveAt fuera de rango");
+                            return rv_void();
+                        }
+                        for (int j = arg.int_value; j + 1 < obj.list_value->count; ++j) obj.list_value->items[j] = obj.list_value->items[j + 1];
+                        obj.list_value->count--;
+                        return rv_void();
+                    }
+                    if (strcmp(callee->as.member.member, "Insert") == 0 && e->as.call.args.count == 2) {
+                        RuntimeValue idx = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        RuntimeValue val = eval_expr(ctx, frame, e->as.call.args.items[1]);
+                        if (idx.kind != RV_INT || val.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "Insert requiere (int index, int value)");
+                            return rv_void();
+                        }
+                        if (idx.int_value < 0 || idx.int_value > obj.list_value->count) {
+                            diag_report(ctx->diags, e->span, "Insert fuera de rango");
+                            return rv_void();
+                        }
+                        if (obj.list_value->count >= obj.list_value->capacity) {
+                            int new_cap = obj.list_value->capacity == 0 ? 4 : obj.list_value->capacity * 2;
+                            obj.list_value->items = realloc(obj.list_value->items, sizeof(int) * (size_t)new_cap);
+                            obj.list_value->capacity = new_cap;
+                        }
+                        for (int j = obj.list_value->count; j > idx.int_value; --j) {
+                            obj.list_value->items[j] = obj.list_value->items[j - 1];
+                        }
+                        obj.list_value->items[idx.int_value] = val.int_value;
+                        obj.list_value->count++;
+                        return rv_void();
+                    }
+                    if (strcmp(callee->as.member.member, "ToArray") == 0 && e->as.call.args.count == 0) {
+                        ArrayInstance *arr = calloc(1, sizeof(ArrayInstance));
+                        arr->length = obj.list_value->count;
+                        if (arr->length > 0) arr->items = calloc((size_t)arr->length, sizeof(int));
+                        for (int i = 0; i < arr->length; ++i) arr->items[i] = obj.list_value->items[i];
+                        return rv_array(arr);
+                    }
+                    if (strcmp(callee->as.member.member, "SequenceEqual") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue other = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (other.kind == RV_LIST && other.list_value) {
+                            if (other.list_value->count != obj.list_value->count) return rv_bool(0);
+                            for (int i = 0; i < obj.list_value->count; ++i) {
+                                if (obj.list_value->items[i] != other.list_value->items[i]) return rv_bool(0);
+                            }
+                            return rv_bool(1);
+                        }
+                        if (other.kind == RV_ARRAY && other.array_value) {
+                            if (other.array_value->length != obj.list_value->count) return rv_bool(0);
+                            for (int i = 0; i < obj.list_value->count; ++i) {
+                                if (obj.list_value->items[i] != other.array_value->items[i]) return rv_bool(0);
+                            }
+                            return rv_bool(1);
+                        }
+                        diag_report(ctx->diags, e->span, "SequenceEqual requiere List<int> o int[]");
+                        return rv_bool(0);
+                    }
+                    if ((strcmp(callee->as.member.member, "Min") == 0 ||
+                         strcmp(callee->as.member.member, "Max") == 0 ||
+                         strcmp(callee->as.member.member, "Average") == 0) && e->as.call.args.count == 0) {
+                        if (obj.list_value->count == 0) return rv_int(0);
+                        int best = obj.list_value->items[0];
+                        int total = 0;
+                        for (int i = 0; i < obj.list_value->count; ++i) {
+                            int v = obj.list_value->items[i];
+                            total += v;
+                            if (strcmp(callee->as.member.member, "Min") == 0 && v < best) best = v;
+                            if (strcmp(callee->as.member.member, "Max") == 0 && v > best) best = v;
+                        }
+                        if (strcmp(callee->as.member.member, "Average") == 0) return rv_int(total / obj.list_value->count);
+                        return rv_int(best);
+                    }
+                    if ((strcmp(callee->as.member.member, "Take") == 0 || strcmp(callee->as.member.member, "Skip") == 0) &&
+                        e->as.call.args.count == 1) {
+                        RuntimeValue arg = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (arg.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "Take/Skip requiere argumento int");
+                            return rv_list(calloc(1, sizeof(ListInstance)));
+                        }
+                        int n = arg.int_value;
+                        if (n < 0) n = 0;
+                        ListInstance *out = calloc(1, sizeof(ListInstance));
+                        int start = strcmp(callee->as.member.member, "Skip") == 0 ? (n > obj.list_value->count ? obj.list_value->count : n) : 0;
+                        int end = strcmp(callee->as.member.member, "Take") == 0 ? (n < obj.list_value->count ? n : obj.list_value->count) : obj.list_value->count;
+                        for (int i = start; i < end; ++i) {
+                            if (out->count >= out->capacity) {
+                                int new_cap = out->capacity == 0 ? 4 : out->capacity * 2;
+                                out->items = realloc(out->items, sizeof(int) * (size_t)new_cap);
+                                out->capacity = new_cap;
+                            }
+                            out->items[out->count++] = obj.list_value->items[i];
+                        }
+                        return rv_list(out);
+                    }
+                    diag_report(ctx->diags, e->span, "metodo de List no soportado: %s", callee->as.member.member);
+                    return rv_void();
+                }
+                if (obj.kind == RV_ARRAY && obj.array_value) {
+                    ListInstance *tmp = calloc(1, sizeof(ListInstance));
+                    tmp->count = obj.array_value->length;
+                    tmp->capacity = tmp->count;
+                    if (tmp->count > 0) tmp->items = calloc((size_t)tmp->count, sizeof(int));
+                    for (int i = 0; i < tmp->count; ++i) tmp->items[i] = obj.array_value->items[i];
+                    RuntimeValue list_obj = rv_list(tmp);
+                    Expr fake_callee = *callee;
+                    fake_callee.as.member.object = NULL;
+                    (void)fake_callee;
+                    if (strcmp(callee->as.member.member, "Sum") == 0 && e->as.call.args.count == 0) {
+                        int total = 0;
+                        for (int i = 0; i < tmp->count; ++i) total += tmp->items[i];
+                        return rv_int(total);
+                    }
+                    if (strcmp(callee->as.member.member, "FirstOrDefault") == 0 && e->as.call.args.count == 0) {
+                        return rv_int(tmp->count > 0 ? tmp->items[0] : 0);
+                    }
+                    if (strcmp(callee->as.member.member, "LastOrDefault") == 0 && e->as.call.args.count == 0) {
+                        return rv_int(tmp->count > 0 ? tmp->items[tmp->count - 1] : 0);
+                    }
+                    if (strcmp(callee->as.member.member, "ElementAtOrDefault") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue idx = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (idx.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "ElementAtOrDefault requiere argumento int");
+                            return rv_int(0);
+                        }
+                        if (idx.int_value < 0 || idx.int_value >= tmp->count) return rv_int(0);
+                        return rv_int(tmp->items[idx.int_value]);
+                    }
+                    if (strcmp(callee->as.member.member, "Count") == 0 && e->as.call.args.count == 0) {
+                        return rv_int(tmp->count);
+                    }
+                    if (strcmp(callee->as.member.member, "Any") == 0 && e->as.call.args.count == 0) {
+                        return rv_bool(tmp->count > 0);
+                    }
+                    if (strcmp(callee->as.member.member, "Where") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue arg = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (arg.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "Where requiere argumento int");
+                            return rv_list(calloc(1, sizeof(ListInstance)));
+                        }
+                        ListInstance *out = calloc(1, sizeof(ListInstance));
+                        for (int i = 0; i < tmp->count; ++i) if (tmp->items[i] >= arg.int_value) {
+                            if (out->count >= out->capacity) {
+                                int new_cap = out->capacity == 0 ? 4 : out->capacity * 2;
+                                out->items = realloc(out->items, sizeof(int) * (size_t)new_cap);
+                                out->capacity = new_cap;
+                            }
+                            out->items[out->count++] = tmp->items[i];
+                        }
+                        return rv_list(out);
+                    }
+                    if (strcmp(callee->as.member.member, "Select") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue arg = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (arg.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "Select requiere argumento int");
+                            return list_obj;
+                        }
+                        for (int i = 0; i < tmp->count; ++i) tmp->items[i] += arg.int_value;
+                        return rv_list(tmp);
+                    }
+                    if (strcmp(callee->as.member.member, "Contains") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue arg = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (arg.kind != RV_INT) {
+                            diag_report(ctx->diags, e->span, "Contains requiere argumento int");
+                            return rv_bool(0);
+                        }
+                        for (int i = 0; i < tmp->count; ++i) if (tmp->items[i] == arg.int_value) return rv_bool(1);
+                        return rv_bool(0);
+                    }
+                    if (strcmp(callee->as.member.member, "Reverse") == 0 && e->as.call.args.count == 0) {
+                        for (int i = 0; i < tmp->count / 2; ++i) {
+                            int j = tmp->count - i - 1;
+                            int swap = tmp->items[i];
+                            tmp->items[i] = tmp->items[j];
+                            tmp->items[j] = swap;
+                        }
+                        return rv_list(tmp);
+                    }
+                    if (strcmp(callee->as.member.member, "ToArray") == 0 && e->as.call.args.count == 0) {
+                        ArrayInstance *arr = calloc(1, sizeof(ArrayInstance));
+                        arr->length = tmp->count;
+                        if (arr->length > 0) arr->items = calloc((size_t)arr->length, sizeof(int));
+                        for (int i = 0; i < arr->length; ++i) arr->items[i] = tmp->items[i];
+                        return rv_array(arr);
+                    }
+                    if (strcmp(callee->as.member.member, "SequenceEqual") == 0 && e->as.call.args.count == 1) {
+                        RuntimeValue other = eval_expr(ctx, frame, e->as.call.args.items[0]);
+                        if (other.kind == RV_LIST && other.list_value) {
+                            if (other.list_value->count != tmp->count) return rv_bool(0);
+                            for (int i = 0; i < tmp->count; ++i) if (tmp->items[i] != other.list_value->items[i]) return rv_bool(0);
+                            return rv_bool(1);
+                        }
+                        if (other.kind == RV_ARRAY && other.array_value) {
+                            if (other.array_value->length != tmp->count) return rv_bool(0);
+                            for (int i = 0; i < tmp->count; ++i) if (tmp->items[i] != other.array_value->items[i]) return rv_bool(0);
+                            return rv_bool(1);
+                        }
+                        diag_report(ctx->diags, e->span, "SequenceEqual requiere List<int> o int[]");
+                        return rv_bool(0);
+                    }
+                    if ((strcmp(callee->as.member.member, "Min") == 0 ||
+                         strcmp(callee->as.member.member, "Max") == 0 ||
+                         strcmp(callee->as.member.member, "Average") == 0) && e->as.call.args.count == 0) {
+                        if (tmp->count == 0) return rv_int(0);
+                        int best = tmp->items[0];
+                        int total = 0;
+                        for (int i = 0; i < tmp->count; ++i) {
+                            int v = tmp->items[i];
+                            total += v;
+                            if (strcmp(callee->as.member.member, "Min") == 0 && v < best) best = v;
+                            if (strcmp(callee->as.member.member, "Max") == 0 && v > best) best = v;
+                        }
+                        if (strcmp(callee->as.member.member, "Average") == 0) return rv_int(total / tmp->count);
+                        return rv_int(best);
+                    }
+                }
+                if (obj.kind == RV_NULL) {
+                    diag_report(ctx->diags, e->span, "invocacion sobre null");
+                    return rv_void();
                 }
                 if (callee->as.member.object->kind == EXPR_IDENTIFIER) {
                     return call_method(ctx,
@@ -508,11 +933,13 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
                                        callee->as.member.member,
                                        e->as.call.args,
                                        frame,
-                                       NULL);
+                                       NULL,
+                                       e->span);
                 }
+                diag_report(ctx->diags, e->span, "invocacion de metodo invalida");
             }
             if (callee->kind == EXPR_IDENTIFIER) {
-                return call_method(ctx, ctx->current_class, callee->as.identifier, e->as.call.args, frame, ctx->current_this);
+                return call_method(ctx, ctx->current_class, callee->as.identifier, e->as.call.args, frame, ctx->current_this, e->span);
             }
             return rv_void();
         }
@@ -540,14 +967,25 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
         case EXPR_INDEX: {
             RuntimeValue arr = eval_expr(ctx, frame, e->as.index.array);
             RuntimeValue idx = eval_expr(ctx, frame, e->as.index.index);
-            if (arr.kind == RV_ARRAY && arr.array_value && idx.kind == RV_INT &&
-                idx.int_value >= 0 && idx.int_value < arr.array_value->length) {
+            if (idx.kind != RV_INT) {
+                diag_report(ctx->diags, e->span, "indice invalido: debe ser int");
+                return rv_int(0);
+            }
+            if (arr.kind == RV_ARRAY && arr.array_value) {
+                if (idx.int_value < 0 || idx.int_value >= arr.array_value->length) {
+                    diag_report(ctx->diags, e->span, "indice fuera de rango en array");
+                    return rv_int(0);
+                }
                 return rv_int(arr.array_value->items[idx.int_value]);
             }
-            if (arr.kind == RV_LIST && arr.list_value && idx.kind == RV_INT &&
-                idx.int_value >= 0 && idx.int_value < arr.list_value->count) {
+            if (arr.kind == RV_LIST && arr.list_value) {
+                if (idx.int_value < 0 || idx.int_value >= arr.list_value->count) {
+                    diag_report(ctx->diags, e->span, "indice fuera de rango en List");
+                    return rv_int(0);
+                }
                 return rv_int(arr.list_value->items[idx.int_value]);
             }
+            diag_report(ctx->diags, e->span, "indexacion requiere array o List");
             return rv_int(0);
         }
         case EXPR_CONDITIONAL: {
@@ -561,6 +999,9 @@ static RuntimeValue eval_expr(ExecContext *ctx, Frame *frame, Expr *e) {
 
 static void exec_stmt(ExecContext *ctx, Frame *frame, Stmt *s) {
     if (ctx->did_return || ctx->did_break || ctx->did_continue || ctx->did_throw) return;
+    if (ctx->debug_trace) {
+        fprintf(stderr, "[trace] stmt kind=%d line=%d col=%d\n", (int)s->kind, s->span.line, s->span.column);
+    }
     switch (s->kind) {
         case STMT_BLOCK: {
             Frame inner;
@@ -636,20 +1077,36 @@ static void exec_stmt(ExecContext *ctx, Frame *frame, Stmt *s) {
         }
         case STMT_FOREACH: {
             RuntimeValue iterable = eval_expr(ctx, frame, s->as.foreach_stmt.iterable);
-            if (iterable.kind != RV_ARRAY || !iterable.array_value) break;
             Frame loop;
             frame_init(&loop, frame);
-            for (int i = 0; i < iterable.array_value->length && !ctx->did_return; ++i) {
-                frame_define(&loop, s->as.foreach_stmt.var_name, rv_int(iterable.array_value->items[i]));
-                exec_stmt(ctx, &loop, s->as.foreach_stmt.body);
-                if (ctx->did_break) {
-                    ctx->did_break = 0;
-                    break;
+            if (iterable.kind == RV_ARRAY && iterable.array_value) {
+                for (int i = 0; i < iterable.array_value->length && !ctx->did_return; ++i) {
+                    frame_define(&loop, s->as.foreach_stmt.var_name, rv_int(iterable.array_value->items[i]));
+                    exec_stmt(ctx, &loop, s->as.foreach_stmt.body);
+                    if (ctx->did_break) {
+                        ctx->did_break = 0;
+                        break;
+                    }
+                    if (ctx->did_continue) {
+                        ctx->did_continue = 0;
+                        continue;
+                    }
                 }
-                if (ctx->did_continue) {
-                    ctx->did_continue = 0;
-                    continue;
+            } else if (iterable.kind == RV_LIST && iterable.list_value) {
+                for (int i = 0; i < iterable.list_value->count && !ctx->did_return; ++i) {
+                    frame_define(&loop, s->as.foreach_stmt.var_name, rv_int(iterable.list_value->items[i]));
+                    exec_stmt(ctx, &loop, s->as.foreach_stmt.body);
+                    if (ctx->did_break) {
+                        ctx->did_break = 0;
+                        break;
+                    }
+                    if (ctx->did_continue) {
+                        ctx->did_continue = 0;
+                        continue;
+                    }
                 }
+            } else {
+                diag_report(ctx->diags, s->span, "foreach requiere iterable array o List");
             }
             break;
         }
@@ -695,7 +1152,7 @@ static void exec_stmt(ExecContext *ctx, Frame *frame, Stmt *s) {
                 int handled = 0;
                 for (size_t i = 0; i < s->as.try_catch_stmt.catch_count; ++i) {
                     CatchClause *cc = &s->as.try_catch_stmt.catches[i];
-                    if (cc->catch_name && !runtime_value_matches_type(ex, cc->catch_type)) continue;
+                    if (cc->catch_name && !runtime_value_matches_type(ctx, ex, cc->catch_type)) continue;
                     ctx->did_throw = 0;
                     Frame catch_frame;
                     frame_init(&catch_frame, frame);
@@ -798,7 +1255,7 @@ static bool build_native_executable(TargetArch target, const char *exe_path, Dia
     return true;
 }
 
-static bool run_program(Program *program, DiagnosticList *diags) {
+static bool run_program(Program *program, DiagnosticList *diags, const CodegenOptions *options) {
     ExecContext ctx = {
         .program = program,
         .diags = diags,
@@ -811,14 +1268,15 @@ static bool run_program(Program *program, DiagnosticList *diags) {
         .active_exception = rv_void(),
         .has_active_exception = 0,
         .current_class = "Program",
-        .current_this = NULL
+        .current_this = NULL,
+        .debug_trace = options && options->debug_trace ? 1 : 0
     };
     MethodDecl *entry = find_method(&ctx, "Program", "Main", NULL, 0);
     if (!entry) {
         diag_report(diags, (Span){0}, "no se encontro Program.Main() como punto de entrada");
         return false;
     }
-    call_method(&ctx, "Program", "Main", (ExprList){0}, NULL, NULL);
+    call_method(&ctx, "Program", "Main", (ExprList){0}, NULL, NULL, (Span){0});
     if (ctx.did_throw) {
         char buf[64];
         diag_report(diags, (Span){0}, "excepcion no capturada: %s",
@@ -845,7 +1303,7 @@ bool codegen_compile_and_run(Program *program,
 
     if (!emit_jccsc_binary(program, options->output_path, diags)) return false;
     if (options->run_after_compile) {
-        if (!run_program(program, diags)) return false;
+        if (!run_program(program, diags, options)) return false;
     }
     return true;
 }
