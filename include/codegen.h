@@ -20,6 +20,7 @@ typedef enum TargetArch {
 typedef struct CodegenOptions {
     const char *output_path;
     bool run_after_compile;
+    bool debug_trace;
     CodegenBackend backend;
     TargetArch target;
     bool native_emit_asm_only;

@@ -135,6 +135,65 @@ run_native_host_executable() {
   fi
 }
 
+run_tooling_checks() {
+  local src="tests/cases/pass/string_print.cs"
+  local log="$TMP_DIR/tooling.log"
+  if ! "$JCCSC" "$src" --complete "Con" >"$log" 2>&1; then
+    echo "[FAIL] tooling_complete (fallo comando)"
+    cat "$log"
+    fail_count=$((fail_count + 1))
+    return
+  fi
+  if grep -Fq "Console" "$log"; then
+    echo "[PASS] tooling_complete"
+    pass_count=$((pass_count + 1))
+  else
+    echo "[FAIL] tooling_complete (sin sugerencias esperadas)"
+    cat "$log"
+    fail_count=$((fail_count + 1))
+  fi
+
+  if ! "$JCCSC" "$src" --highlight >"$log" 2>&1; then
+    echo "[FAIL] tooling_highlight (fallo comando)"
+    cat "$log"
+    fail_count=$((fail_count + 1))
+  else
+    echo "[PASS] tooling_highlight"
+    pass_count=$((pass_count + 1))
+  fi
+
+  if "$JCCSC" "tests/cases/fail/undefined_symbol.cs" --diagnostics-json >"$log" 2>&1; then
+    echo "[FAIL] tooling_diag_json (deberia fallar)"
+    fail_count=$((fail_count + 1))
+  elif grep -Fq "[" "$log" && grep -Fq "\"message\"" "$log"; then
+    echo "[PASS] tooling_diag_json"
+    pass_count=$((pass_count + 1))
+  else
+    echo "[FAIL] tooling_diag_json (json no detectado)"
+    cat "$log"
+    fail_count=$((fail_count + 1))
+  fi
+
+  rm -f jccsc.packages
+  if ! "$JCCSC" "$src" --add-package "Test.Pkg@1.0.0" >"$log" 2>&1; then
+    echo "[FAIL] tooling_add_package (fallo comando)"
+    cat "$log"
+    fail_count=$((fail_count + 1))
+  elif ! "$JCCSC" "$src" --list-packages >"$log" 2>&1; then
+    echo "[FAIL] tooling_list_package (fallo comando)"
+    cat "$log"
+    fail_count=$((fail_count + 1))
+  elif grep -Fq "Test.Pkg@1.0.0" "$log"; then
+    echo "[PASS] tooling_package"
+    pass_count=$((pass_count + 1))
+  else
+    echo "[FAIL] tooling_package (entrada no encontrada)"
+    cat "$log"
+    fail_count=$((fail_count + 1))
+  fi
+  rm -f jccsc.packages
+}
+
 # PASS CASES (14)
 run_pass "arith_precedence" "7"
 run_pass "if_else" $'111\n222'
@@ -178,6 +237,12 @@ run_pass "default_return_values" $'false\nnull\ntrue'
 run_pass "generics_syntax_basic" "5"
 run_pass "async_await_basic" "7"
 run_pass "list_int_basic" $'2\n30\n7\n0'
+run_pass "lsp_linq_using_complex" "35"
+run_pass "advanced_linq_oop_lsp_using" "27"
+run_pass "linq_advanced_stats" "16"
+run_pass "list_remove_ops" "5"
+run_pass "list_insert_toarray" "6"
+run_pass "linq_sequence_ops" "12"
 
 # NATIVE BACKEND TARGET CASES (4)
 run_native_target "x86_64"
@@ -186,6 +251,7 @@ run_native_target "arm64"
 run_native_target "arm32"
 run_native_fail_run_flag
 run_native_host_executable
+run_tooling_checks
 
 # FAIL CASES (10)
 run_fail "undefined_symbol" "simbolo no definido"
@@ -209,6 +275,16 @@ run_fail "throw_uncaught" "excepcion no capturada"
 run_fail "rethrow_without_active_exception" "throw sin excepcion activa"
 run_fail "multi_catch_unmatched" "excepcion no capturada"
 run_fail "ternary_non_bool_condition" "la condicion del operador ternario debe ser bool/int"
+run_fail "unknown_base_type" "tipo base/interface no definido"
+run_fail "unrelated_class_assignment" "tipo incompatible en inicializacion"
+run_fail "division_by_zero_runtime" "division por cero"
+run_fail "list_index_out_of_range" "indice fuera de rango"
+run_fail "linq_invalid_argument" "Where requiere argumento int"
+run_fail "null_member_access" "acceso a miembro sobre null"
+run_fail "index_assignment_out_of_range" "asignacion fuera de rango"
+run_fail "unsupported_list_method" "no soportado"
+run_fail "list_insert_out_of_range" "Insert fuera de rango"
+run_fail "linq_sequence_wrong_arg" "ElementAtOrDefault requiere argumento int"
 
 echo
 echo "Resumen: PASS=$pass_count FAIL=$fail_count"
