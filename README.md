@@ -1,82 +1,115 @@
-# JCCSC - compilador C# subset en C (sin GCC/Clang como backend del lenguaje)
+# JCSC C# Compiler (.NET 8)
 
-Este proyecto compila un subconjunto de C# y produce un artefacto propio `.jccsc`.
-Además puede ejecutar directamente el programa compilado con su runtime interno (`--run`).
+Compilador de C# funcional con arquitectura modular de compilador real:
 
-## Pipeline
+- **Front-end propio**: Lexer, Parser (AST), Semantic Analyzer.
+- **Back-end**: emisión de ensamblados usando **Roslyn** (`Microsoft.CodeAnalysis.CSharp`).
+- **CLI** para compilar `.cs` a `.exe` o `.dll`.
 
-1. Lexer
-2. Parser + AST
-3. Análisis semántico
-4. Compilación a formato propio `JCCSC-BC-1`
-5. Runtime interno para ejecutar `Program.Main()`
+> Enfoque: usar un front-end controlado para diagnósticos/extensibilidad y Roslyn como backend estable para generar IL/ensamblados de producción.
+
+## Estructura del proyecto
+
+```text
+src/
+  Jcsc.Compiler/
+    Ast/
+      AstNodes.cs
+    Cli/
+      CompilationPipeline.cs
+    CodeGen/
+      RoslynEmitter.cs
+    Common/
+      TextSpan.cs
+    Diagnostics/
+      Diagnostic.cs
+      DiagnosticBag.cs
+    Lexing/
+      Lexer.cs
+      Token.cs
+      TokenKind.cs
+    Parsing/
+      Parser.cs
+    Semantic/
+      SemanticAnalyzer.cs
+      Symbols.cs
+    Program.cs
+    Jcsc.Compiler.csproj
+examples/
+  HelloWorld.cs
+  FunctionsDemo.cs
+```
+
+## Módulos
+
+1. **Lexer**
+   - Tokeniza keywords, identificadores, literales, operadores y símbolos.
+   - Ignora espacios y comentarios `//` y `/* ... */`.
+   - Reporta errores léxicos con línea/columna.
+
+2. **Parser + AST**
+   - Parser recursivo descendente con precedencias para expresiones.
+   - Construye AST con separación clara entre `Expression` y `Statement`.
+   - Soporta:
+     - variables
+     - funciones
+     - clases
+     - `if/else`
+     - `for/while`
+     - expresiones aritméticas/lógicas
+
+3. **Análisis semántico**
+   - Tabla de símbolos con scopes anidados.
+   - Validación básica de tipos (`int`, `string`, `bool`, `void`, `var`).
+   - Detección de no-definidos, redeclaraciones y asignaciones incompatibles.
+
+4. **Generación de código (Roslyn)**
+   - Convierte texto fuente a `CSharpCompilation`.
+   - Emite `.exe` o `.dll`.
+   - Recolecta errores de Roslyn y los unifica en diagnósticos del compilador.
+
+5. **CLI**
+   - Entrada: archivo `.cs`
+   - Salida: ensamblado configurable
+   - Flags: `--output/-o`, `--dll`, `--debug`
 
 ## Uso
 
-```bash
-make
-./jccsc examples/hello.cs -o hello.jccsc --run
-./jccsc examples/functions.cs -o functions.jccsc --run
-./jccsc examples/bool_loops.cs -o bool_loops.jccsc --run
-./jccsc examples/hello.cs -o native_x64.s --backend native --target x86_64
-./jccsc examples/hello.cs -o native_x86.s --backend native --target x86_32
-./jccsc examples/hello.cs -o native_arm64.s --backend native --target arm64
-./jccsc examples/hello.cs -o native_arm32.s --backend native --target arm32
-./jccsc examples/hello.cs --backend native
-./hello
-```
-
-En backend `native`, si no pasas `--target`, JCCSC detecta automáticamente la arquitectura del host.
-Si no pasas `-o`, el ejecutable toma el nombre base del archivo de entrada.
-Usa `--emit-asm` para forzar salida ensamblador en lugar de ejecutable.
-
-## Testing
+### Build del compilador
 
 ```bash
-make test
+dotnet build src/Jcsc.Compiler/Jcsc.Compiler.csproj
 ```
 
-Incluye una batería amplia de tests de éxito y error bajo `tests/cases`.
+### Compilar ejemplo Hello World
 
-## Alcance actual
+```bash
+dotnet run --project src/Jcsc.Compiler/Jcsc.Compiler.csproj -- examples/HelloWorld.cs -o artifacts/hello.exe
+```
 
-- Tipos básicos: `int`, `bool`, `string`, `void`
-- Clases y métodos estáticos
-- Sobrecarga de métodos por cantidad y tipos de parámetros (int/bool/string/arrays/clases por nombre exacto)
-- Variables, `if/else`, `while`, `do/while`, `for`, `switch`, `return`, `break`, `continue`
-- Excepciones básicas: `throw expr`, `throw;` (rethrow), `try` con múltiples `catch` (incluye `catch {}`) + `finally`
-- `using` y bloque `namespace ... { ... }`
-- Objetos por referencia con `new`, campos y metodos de instancia basicos
-- Declaraciones `struct` básicas (tratadas con semántica de objeto en runtime actual)
-- Declaraciones `interface` básicas (firmas + `class : Interface` parseable)
-- Sintaxis básica de genéricos en declaraciones (`class X<T>`, métodos `M<U>`) y tipos `X<int>`
-- Soporte básico runtime para `List<int>` (`Add`, `Clear`, `Count`, indexación)
-- Arrays `int[]`, `new int[n]` e indexación `a[i]`
-- `foreach (int x in arr)` sobre `int[]`
-- Propiedad `arr.Length` para arrays
-- Expresiones aritméticas y lógicas
-- `&&` y `||` con short-circuit en runtime
-- Operador null-coalescing `??`
-- Operador condicional ternario `cond ? a : b`
-- Sintaxis básica `async` / `await` (ejecución síncrona en runtime actual)
-- Concatenación de strings con `+` (incluye `string + int/bool/null`)
-- Operadores de actualización/asignación: `++`, `--`, `+=`, `-=`, `*=`, `/=`, `%=`
-- Retornos por defecto cuando falta `return` (int=0, bool=false, refs/string=null)
-- Literales booleanos: `true`, `false`
-- Literal `null` para tipos por referencia (`class`, `int[]`) y comparaciones `==`/`!=`
-- Built-in: `Console.WriteLine(...)`
-- Backend nativo con auto-detección de host para generar ejecutable local
-- Salida ensamblador (`--emit-asm`) para `x86_32`, `x86_64`, `arm32`, `arm64`
+### Ejecutar binario generado
 
-## Nota
+```bash
+dotnet artifacts/hello.exe
+```
 
-No depende de Roslyn ni de invocar GCC/Clang para traducir C#.
-La ejecución se hace en el runtime propio dentro de `jccsc`.
+### Compilar librería
 
-## Objetivo de largo plazo
+```bash
+dotnet run --project src/Jcsc.Compiler/Jcsc.Compiler.csproj -- examples/FunctionsDemo.cs --dll -o artifacts/functions.dll
+```
 
-El objetivo es seguir ampliando el subset hasta acercarse a C# completo.
-Actualmente **no implementa .NET 8 ni todo C#**: faltan, entre otros, generics,
-LINQ, async/await, excepciones completas, delegates/events, attributes, structs,
-interfaces avanzadas, nullable reference types, reflection, librería base completa
-y backend nativo AOT real con ABI completo.
+## Ejemplos
+
+- `examples/HelloWorld.cs`: hello world mínimo.
+- `examples/FunctionsDemo.cs`: funciones, loops y condicionales.
+
+## Extensibilidad (cómo crecer hacia compilador aún más completo)
+
+1. **Tipos enriquecidos**: introducir sistema de tipos nominales (clases/interfaces) y conversiones implícitas.
+2. **Binder dedicado**: separar `binding` de `semantic` para producir árbol enlazado tipado.
+3. **IR intermedia**: agregar IR propia antes de Roslyn o IL Emit para optimizaciones.
+4. **Lowering**: transformar `for`, `if`, etc. a constructos canónicos para simplificar backend.
+5. **Análisis avanzado**: flujo de control, definite assignment, nullability personalizada.
+6. **Incremental compilation**: cache de syntax trees y symbols por módulo.
+
