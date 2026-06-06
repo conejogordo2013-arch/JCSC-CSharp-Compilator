@@ -1,0 +1,777 @@
+#include "parser.h"
+
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct Parser {
+    Arena *arena;
+    Vector *tokens;
+    size_t pos;
+    DiagnosticList *diags;
+    int loop_depth;
+    int switch_depth;
+} Parser;
+
+static Token *peek(Parser *p) { return (Token *)vector_get(p->tokens, p->pos); }
+static Token *peek_n(Parser *p, size_t n) {
+    size_t idx = p->pos + n;
+    if (idx >= p->tokens->count) idx = p->tokens->count - 1;
+    return (Token *)vector_get(p->tokens, idx);
+}
+static Token *prev(Parser *p) { return (Token *)vector_get(p->tokens, p->pos - 1); }
+static bool at(Parser *p, TokenKind k) { return peek(p)->kind == k; }
+static Token *advance(Parser *p) { if (!at(p, TOK_EOF)) p->pos++; return prev(p); }
+static bool match(Parser *p, TokenKind k) { if (at(p, k)) { advance(p); return true; } return false; }
+
+static void synchronize_stmt(Parser *p) {
+    while (!at(p, TOK_EOF)) {
+        if (match(p, TOK_SEMI)) return;
+        if (at(p, TOK_RBRACE)) return;
+        if (at(p, TOK_KW_CLASS) || at(p, TOK_KW_STRUCT) || at(p, TOK_KW_INTERFACE) ||
+            at(p, TOK_KW_IF) || at(p, TOK_KW_FOR) || at(p, TOK_KW_WHILE) ||
+            at(p, TOK_KW_RETURN) || at(p, TOK_KW_TRY) || at(p, TOK_KW_THROW)) {
+            return;
+        }
+        advance(p);
+    }
+}
+
+static Token *expect(Parser *p, TokenKind k, const char *msg) {
+    if (at(p, k)) return advance(p);
+    diag_report(p->diags, peek(p)->span, "%s. token actual: %s", msg, token_kind_name(peek(p)->kind));
+    return peek(p);
+}
+
+static void expect_semi_recover(Parser *p, const char *msg) {
+    if (match(p, TOK_SEMI)) return;
+    diag_report(p->diags, peek(p)->span, "%s. token actual: %s", msg, token_kind_name(peek(p)->kind));
+    synchronize_stmt(p);
+}
+
+static void *aalloc(Parser *p, size_t size) {
+    void *mem = arena_alloc(p->arena, size);
+    memset(mem, 0, size);
+    return mem;
+}
+
+static TypeRef parse_type(Parser *p) {
+    Token *t = peek(p);
+    if (match(p, TOK_KW_INT)) {
+        if (match(p, TOK_LBRACKET)) {
+            expect(p, TOK_RBRACKET, "se esperaba ']' en tipo array");
+            return (TypeRef){.kind = TYPE_CLASS, .name = "int[]"};
+        }
+        return (TypeRef){.kind = TYPE_INT, .name = "int"};
+    }
+    if (match(p, TOK_KW_BOOL)) return (TypeRef){.kind = TYPE_BOOL, .name = "bool"};
+    if (match(p, TOK_KW_STRING)) return (TypeRef){.kind = TYPE_STRING, .name = "string"};
+    if (match(p, TOK_KW_VOID)) return (TypeRef){.kind = TYPE_VOID, .name = "void"};
+    if (match(p, TOK_IDENTIFIER)) {
+        const char *name = prev(p)->lexeme;
+        if (match(p, TOK_LT)) {
+            int depth = 1;
+            while (depth > 0 && !at(p, TOK_EOF)) {
+                if (match(p, TOK_LT)) depth++;
+                else if (match(p, TOK_GT)) depth--;
+                else if (match(p, TOK_COMMA) || match(p, TOK_IDENTIFIER) ||
+                         match(p, TOK_KW_INT) || match(p, TOK_KW_BOOL) ||
+                         match(p, TOK_KW_STRING) || match(p, TOK_KW_VOID)) {}
+                else {
+                    diag_report(p->diags, peek(p)->span, "tipo generico invalido");
+                    advance(p);
+                }
+            }
+        }
+        return (TypeRef){.kind = TYPE_CLASS, .name = name};
+    }
+    diag_report(p->diags, t->span, "se esperaba tipo valido");
+    return (TypeRef){.kind = TYPE_UNKNOWN, .name = "<error>"};
+}
+
+static void maybe_parse_generic_params(Parser *p) {
+    if (!match(p, TOK_LT)) return;
+    expect(p, TOK_IDENTIFIER, "se esperaba parametro generico");
+    while (match(p, TOK_COMMA)) {
+        expect(p, TOK_IDENTIFIER, "se esperaba parametro generico");
+    }
+    expect(p, TOK_GT, "se esperaba '>' en parametros genericos");
+}
+
+static Expr *parse_expr(Parser *p);
+static bool is_assignable_expr(Expr *e) {
+    return e->kind == EXPR_IDENTIFIER || e->kind == EXPR_MEMBER || e->kind == EXPR_INDEX;
+}
+
+static Expr *new_expr(Parser *p, ExprKind kind, Span span) {
+    Expr *e = aalloc(p, sizeof(Expr));
+    e->kind = kind;
+    e->span = span;
+    e->inferred_type = (TypeRef){.kind = TYPE_UNKNOWN, .name = "unknown"};
+    return e;
+}
+
+static Expr *make_int_literal(Parser *p, Span span, int value) {
+    Expr *e = new_expr(p, EXPR_INT, span);
+    e->as.int_value = value;
+    return e;
+}
+
+static Expr *make_binary(Parser *p, Span span, TokenKind op, Expr *left, Expr *right) {
+    Expr *e = new_expr(p, EXPR_BINARY, span);
+    e->as.binary.op = op;
+    e->as.binary.left = left;
+    e->as.binary.right = right;
+    return e;
+}
+
+static Expr *make_assign(Parser *p, Span span, Expr *target, Expr *value) {
+    Expr *e = new_expr(p, EXPR_ASSIGN, span);
+    e->as.assign.target = target;
+    e->as.assign.value = value;
+    return e;
+}
+
+static Stmt *new_stmt(Parser *p, StmtKind kind, Span span) {
+    Stmt *s = aalloc(p, sizeof(Stmt));
+    s->kind = kind;
+    s->span = span;
+    return s;
+}
+
+static Expr *parse_primary(Parser *p) {
+    Token *t = peek(p);
+    if (match(p, TOK_INT_LITERAL)) {
+        Expr *e = new_expr(p, EXPR_INT, prev(p)->span);
+        e->as.int_value = atoi(prev(p)->lexeme);
+        return e;
+    }
+    if (match(p, TOK_KW_TRUE)) {
+        Expr *e = new_expr(p, EXPR_BOOL, prev(p)->span);
+        e->as.bool_value = true;
+        return e;
+    }
+    if (match(p, TOK_KW_FALSE)) {
+        Expr *e = new_expr(p, EXPR_BOOL, prev(p)->span);
+        e->as.bool_value = false;
+        return e;
+    }
+    if (match(p, TOK_KW_NULL)) {
+        return new_expr(p, EXPR_NULL, prev(p)->span);
+    }
+    if (match(p, TOK_STRING_LITERAL)) {
+        Expr *e = new_expr(p, EXPR_STRING, prev(p)->span);
+        e->as.string_value = prev(p)->lexeme;
+        return e;
+    }
+    if (match(p, TOK_KW_NEW)) {
+        if (match(p, TOK_KW_INT)) {
+            expect(p, TOK_LBRACKET, "se esperaba '[' en new int[expr]");
+            Expr *size = parse_expr(p);
+            expect(p, TOK_RBRACKET, "se esperaba ']'");
+            Expr *e = new_expr(p, EXPR_NEW, prev(p)->span);
+            e->as.new_expr.class_name = "int[]";
+            e->as.new_expr.array_size_expr = size;
+            e->as.new_expr.is_int_array = true;
+            return e;
+        } else {
+            Token *name = expect(p, TOK_IDENTIFIER, "se esperaba nombre de clase despues de new");
+            if (match(p, TOK_LT)) {
+                int depth = 1;
+                while (depth > 0 && !at(p, TOK_EOF)) {
+                    if (match(p, TOK_LT)) depth++;
+                    else if (match(p, TOK_GT)) depth--;
+                    else if (match(p, TOK_COMMA) || match(p, TOK_IDENTIFIER) ||
+                             match(p, TOK_KW_INT) || match(p, TOK_KW_BOOL) ||
+                             match(p, TOK_KW_STRING) || match(p, TOK_KW_VOID)) {}
+                    else advance(p);
+                }
+            }
+            expect(p, TOK_LPAREN, "se esperaba '(' en expresion new");
+            expect(p, TOK_RPAREN, "se esperaba ')' en expresion new");
+            Expr *e = new_expr(p, EXPR_NEW, name->span);
+            e->as.new_expr.class_name = name->lexeme;
+            e->as.new_expr.array_size_expr = NULL;
+            e->as.new_expr.is_int_array = false;
+            return e;
+        }
+    }
+    if (match(p, TOK_IDENTIFIER)) {
+        Expr *e = new_expr(p, EXPR_IDENTIFIER, prev(p)->span);
+        e->as.identifier = prev(p)->lexeme;
+        return e;
+    }
+    if (match(p, TOK_LPAREN)) {
+        Expr *e = parse_expr(p);
+        expect(p, TOK_RPAREN, "se esperaba ')' al final de expresion");
+        return e;
+    }
+    diag_report(p->diags, t->span, "expresion primaria invalida");
+    advance(p);
+    return new_expr(p, EXPR_IDENTIFIER, t->span);
+}
+
+static Expr *parse_postfix(Parser *p) {
+    Expr *expr = parse_primary(p);
+    while (true) {
+        if (match(p, TOK_DOT)) {
+            Token *id = expect(p, TOK_IDENTIFIER, "se esperaba identificador despues de '.'");
+            Expr *m = new_expr(p, EXPR_MEMBER, id->span);
+            m->as.member.object = expr;
+            m->as.member.member = id->lexeme;
+            expr = m;
+        } else if (match(p, TOK_LPAREN)) {
+            Vector args; vector_init(&args, sizeof(Expr *));
+            if (!at(p, TOK_RPAREN)) {
+                do {
+                    Expr *arg = parse_expr(p);
+                    vector_push(&args, &arg);
+                } while (match(p, TOK_COMMA));
+            }
+            expect(p, TOK_RPAREN, "se esperaba ')' en llamada");
+            Expr *c = new_expr(p, EXPR_CALL, expr->span);
+            c->as.call.callee = expr;
+            c->as.call.args.count = args.count;
+            c->as.call.args.items = aalloc(p, sizeof(Expr *) * args.count);
+            memcpy(c->as.call.args.items, args.data, sizeof(Expr *) * args.count);
+            vector_free(&args);
+            expr = c;
+        } else if (match(p, TOK_LBRACKET)) {
+            Expr *idx = parse_expr(p);
+            expect(p, TOK_RBRACKET, "se esperaba ']'");
+            Expr *ix = new_expr(p, EXPR_INDEX, expr->span);
+            ix->as.index.array = expr;
+            ix->as.index.index = idx;
+            expr = ix;
+        } else if (match(p, TOK_PLUS_PLUS) || match(p, TOK_MINUS_MINUS)) {
+            TokenKind op = prev(p)->kind == TOK_PLUS_PLUS ? TOK_PLUS : TOK_MINUS;
+            if (!is_assignable_expr(expr)) {
+                diag_report(p->diags, expr->span, "operador ++/-- requiere una variable asignable");
+                return expr;
+            }
+            Expr *step = make_int_literal(p, prev(p)->span, 1);
+            Expr *bin = make_binary(p, expr->span, op, expr, step);
+            expr = make_assign(p, expr->span, expr, bin);
+        } else break;
+    }
+    return expr;
+}
+
+static Expr *parse_unary(Parser *p) {
+    if (match(p, TOK_KW_AWAIT)) {
+        Token *op = prev(p);
+        Expr *e = new_expr(p, EXPR_UNARY, op->span);
+        e->as.unary.op = op->kind;
+        e->as.unary.operand = parse_unary(p);
+        return e;
+    }
+    if (match(p, TOK_PLUS_PLUS) || match(p, TOK_MINUS_MINUS)) {
+        Token *inc_tok = prev(p);
+        TokenKind op = inc_tok->kind == TOK_PLUS_PLUS ? TOK_PLUS : TOK_MINUS;
+        Expr *target = parse_unary(p);
+        if (!is_assignable_expr(target)) {
+            diag_report(p->diags, target->span, "operador ++/-- requiere una variable asignable");
+            return target;
+        }
+        Expr *step = make_int_literal(p, inc_tok->span, 1);
+        Expr *bin = make_binary(p, target->span, op, target, step);
+        return make_assign(p, target->span, target, bin);
+    }
+    if (match(p, TOK_NOT) || match(p, TOK_MINUS)) {
+        Token *op = prev(p);
+        Expr *e = new_expr(p, EXPR_UNARY, op->span);
+        e->as.unary.op = op->kind;
+        e->as.unary.operand = parse_unary(p);
+        return e;
+    }
+    return parse_postfix(p);
+}
+
+static Expr *parse_binary(Parser *p, int prec);
+static int precedence(TokenKind k) {
+    switch (k) {
+        case TOK_COALESCE: return 1;
+        case TOK_OR: return 2;
+        case TOK_AND: return 3;
+        case TOK_EQ: case TOK_NEQ: return 4;
+        case TOK_LT: case TOK_LE: case TOK_GT: case TOK_GE: return 5;
+        case TOK_PLUS: case TOK_MINUS: return 6;
+        case TOK_STAR: case TOK_SLASH: case TOK_PERCENT: return 7;
+        default: return 0;
+    }
+}
+
+static Expr *parse_binary(Parser *p, int prec) {
+    Expr *left = parse_unary(p);
+    for (;;) {
+        int p2 = precedence(peek(p)->kind);
+        if (p2 < prec) break;
+        Token *op = advance(p);
+        Expr *right = parse_binary(p, p2 + 1);
+        Expr *b = new_expr(p, EXPR_BINARY, op->span);
+        b->as.binary.op = op->kind;
+        b->as.binary.left = left;
+        b->as.binary.right = right;
+        left = b;
+    }
+    return left;
+}
+
+static Expr *parse_conditional(Parser *p) {
+    Expr *cond = parse_binary(p, 1);
+    if (match(p, TOK_QUESTION)) {
+        Expr *when_true = parse_expr(p);
+        expect(p, TOK_COLON, "se esperaba ':' en operador ternario");
+        Expr *when_false = parse_conditional(p);
+        Expr *e = new_expr(p, EXPR_CONDITIONAL, cond->span);
+        e->as.conditional.condition = cond;
+        e->as.conditional.when_true = when_true;
+        e->as.conditional.when_false = when_false;
+        return e;
+    }
+    return cond;
+}
+
+static Expr *parse_expr(Parser *p) {
+    Expr *left = parse_conditional(p);
+    if (match(p, TOK_ASSIGN) || match(p, TOK_PLUS_ASSIGN) || match(p, TOK_MINUS_ASSIGN) ||
+        match(p, TOK_STAR_ASSIGN) || match(p, TOK_SLASH_ASSIGN) || match(p, TOK_PERCENT_ASSIGN)) {
+        TokenKind assign_op = prev(p)->kind;
+        Expr *value = parse_expr(p);
+        if (!is_assignable_expr(left)) {
+            diag_report(p->diags, left->span, "lado izquierdo invalido en asignacion");
+        }
+        if (assign_op == TOK_ASSIGN) {
+            return make_assign(p, left->span, left, value);
+        }
+        TokenKind bin_op = TOK_PLUS;
+        if (assign_op == TOK_MINUS_ASSIGN) bin_op = TOK_MINUS;
+        else if (assign_op == TOK_STAR_ASSIGN) bin_op = TOK_STAR;
+        else if (assign_op == TOK_SLASH_ASSIGN) bin_op = TOK_SLASH;
+        else if (assign_op == TOK_PERCENT_ASSIGN) bin_op = TOK_PERCENT;
+        Expr *bin = make_binary(p, left->span, bin_op, left, value);
+        return make_assign(p, left->span, left, bin);
+    }
+    return left;
+}
+
+static Stmt *parse_stmt(Parser *p);
+static Stmt *parse_switch_stmt(Parser *p, Span s);
+
+static Stmt *parse_block(Parser *p) {
+    Token *open = expect(p, TOK_LBRACE, "se esperaba '{'");
+    Vector stmts; vector_init(&stmts, sizeof(Stmt *));
+    while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF)) {
+        Stmt *s = parse_stmt(p);
+        vector_push(&stmts, &s);
+    }
+    expect(p, TOK_RBRACE, "se esperaba '}'");
+    Stmt *b = new_stmt(p, STMT_BLOCK, open->span);
+    b->as.block.count = stmts.count;
+    b->as.block.items = aalloc(p, sizeof(Stmt *) * stmts.count);
+    memcpy(b->as.block.items, stmts.data, sizeof(Stmt *) * stmts.count);
+    vector_free(&stmts);
+    return b;
+}
+
+static bool is_type_start(Parser *p) {
+    return at(p, TOK_KW_INT) || at(p, TOK_KW_BOOL) || at(p, TOK_KW_STRING) || at(p, TOK_IDENTIFIER);
+}
+
+static Stmt *parse_stmt(Parser *p) {
+    if (at(p, TOK_LBRACE)) return parse_block(p);
+    if (match(p, TOK_KW_IF)) {
+        Span s = prev(p)->span;
+        expect(p, TOK_LPAREN, "se esperaba '('");
+        Expr *cond = parse_expr(p);
+        expect(p, TOK_RPAREN, "se esperaba ')'");
+        Stmt *then_s = parse_stmt(p);
+        Stmt *else_s = NULL;
+        if (match(p, TOK_KW_ELSE)) else_s = parse_stmt(p);
+        Stmt *st = new_stmt(p, STMT_IF, s);
+        st->as.if_stmt.condition = cond;
+        st->as.if_stmt.then_branch = then_s;
+        st->as.if_stmt.else_branch = else_s;
+        return st;
+    }
+    if (match(p, TOK_KW_WHILE)) {
+        Span s = prev(p)->span;
+        expect(p, TOK_LPAREN, "se esperaba '('");
+        Expr *cond = parse_expr(p);
+        expect(p, TOK_RPAREN, "se esperaba ')'");
+        p->loop_depth++;
+        Stmt *body = parse_stmt(p);
+        p->loop_depth--;
+        Stmt *st = new_stmt(p, STMT_WHILE, s);
+        st->as.while_stmt.condition = cond;
+        st->as.while_stmt.body = body;
+        return st;
+    }
+    if (match(p, TOK_KW_DO)) {
+        Span s = prev(p)->span;
+        p->loop_depth++;
+        Stmt *body = parse_stmt(p);
+        p->loop_depth--;
+        expect(p, TOK_KW_WHILE, "se esperaba while despues de do");
+        expect(p, TOK_LPAREN, "se esperaba '('");
+        Expr *cond = parse_expr(p);
+        expect(p, TOK_RPAREN, "se esperaba ')'");
+        expect_semi_recover(p, "se esperaba ';' en do-while");
+        Stmt *st = new_stmt(p, STMT_DO_WHILE, s);
+        st->as.do_while_stmt.body = body;
+        st->as.do_while_stmt.condition = cond;
+        return st;
+    }
+    if (match(p, TOK_KW_TRY)) {
+        Span s = prev(p)->span;
+        Stmt *try_block = parse_block(p);
+        Vector catches;
+        vector_init(&catches, sizeof(CatchClause));
+        while (match(p, TOK_KW_CATCH)) {
+            TypeRef ct = (TypeRef){.kind = TYPE_UNKNOWN, .name = "unknown"};
+            const char *cn_lexeme = NULL;
+            if (match(p, TOK_LPAREN)) {
+                ct = parse_type(p);
+                Token *cn = expect(p, TOK_IDENTIFIER, "se esperaba nombre de variable en catch");
+                cn_lexeme = cn->lexeme;
+                expect(p, TOK_RPAREN, "se esperaba ')' en catch");
+            }
+            Stmt *catch_block = parse_block(p);
+            CatchClause clause = {.catch_type = ct, .catch_name = cn_lexeme, .catch_block = catch_block};
+            vector_push(&catches, &clause);
+        }
+        if (catches.count == 0) {
+            diag_report(p->diags, s, "try requiere al menos un catch");
+        }
+        Stmt *finally_block = NULL;
+        if (match(p, TOK_KW_FINALLY)) {
+            finally_block = parse_block(p);
+        }
+        Stmt *st = new_stmt(p, STMT_TRY_CATCH, s);
+        st->as.try_catch_stmt.try_block = try_block;
+        st->as.try_catch_stmt.catch_count = catches.count;
+        st->as.try_catch_stmt.catches = aalloc(p, sizeof(CatchClause) * catches.count);
+        memcpy(st->as.try_catch_stmt.catches, catches.data, sizeof(CatchClause) * catches.count);
+        st->as.try_catch_stmt.finally_block = finally_block;
+        vector_free(&catches);
+        return st;
+    }
+    if (match(p, TOK_KW_THROW)) {
+        Span s = prev(p)->span;
+        Expr *ex = at(p, TOK_SEMI) ? NULL : parse_expr(p);
+        expect_semi_recover(p, "se esperaba ';' despues de throw");
+        Stmt *st = new_stmt(p, STMT_THROW, s);
+        st->as.throw_expr = ex;
+        return st;
+    }
+    if (match(p, TOK_KW_FOR)) {
+        Span s = prev(p)->span;
+        expect(p, TOK_LPAREN, "se esperaba '('");
+        Stmt *init = NULL;
+        if (!at(p, TOK_SEMI)) {
+            if (is_type_start(p)) {
+                TypeRef t = parse_type(p);
+                Token *name = expect(p, TOK_IDENTIFIER, "se esperaba nombre de variable");
+                expect(p, TOK_ASSIGN, "se esperaba '=' en for");
+                Expr *value = parse_expr(p);
+                init = new_stmt(p, STMT_VAR, name->span);
+                init->as.var.type = t;
+                init->as.var.name = name->lexeme;
+                init->as.var.initializer = value;
+            } else {
+                init = new_stmt(p, STMT_EXPR, peek(p)->span);
+                init->as.expr = parse_expr(p);
+            }
+        }
+        expect_semi_recover(p, "se esperaba ';'");
+        Expr *cond = at(p, TOK_SEMI) ? NULL : parse_expr(p);
+        expect_semi_recover(p, "se esperaba ';'");
+        Expr *inc = at(p, TOK_RPAREN) ? NULL : parse_expr(p);
+        expect(p, TOK_RPAREN, "se esperaba ')'");
+        p->loop_depth++;
+        Stmt *body = parse_stmt(p);
+        p->loop_depth--;
+        Stmt *st = new_stmt(p, STMT_FOR, s);
+        st->as.for_stmt.initializer = init;
+        st->as.for_stmt.condition = cond;
+        st->as.for_stmt.increment = inc;
+        st->as.for_stmt.body = body;
+        return st;
+    }
+    if (match(p, TOK_KW_FOREACH)) {
+        Span s = prev(p)->span;
+        expect(p, TOK_LPAREN, "se esperaba '('");
+        TypeRef var_type = parse_type(p);
+        if (var_type.kind != TYPE_INT) {
+            diag_report(p->diags, s, "foreach actualmente soporta variable int");
+        }
+        Token *name = expect(p, TOK_IDENTIFIER, "se esperaba nombre de variable en foreach");
+        expect(p, TOK_KW_IN, "se esperaba 'in' en foreach");
+        Expr *iterable = parse_expr(p);
+        expect(p, TOK_RPAREN, "se esperaba ')'");
+        p->loop_depth++;
+        Stmt *body = parse_stmt(p);
+        p->loop_depth--;
+        Stmt *st = new_stmt(p, STMT_FOREACH, s);
+        st->as.foreach_stmt.var_type = var_type;
+        st->as.foreach_stmt.var_name = name->lexeme;
+        st->as.foreach_stmt.iterable = iterable;
+        st->as.foreach_stmt.body = body;
+        return st;
+    }
+    if (match(p, TOK_KW_SWITCH)) {
+        return parse_switch_stmt(p, prev(p)->span);
+    }
+    if (match(p, TOK_KW_RETURN)) {
+        Stmt *st = new_stmt(p, STMT_RETURN, prev(p)->span);
+        st->as.return_expr = at(p, TOK_SEMI) ? NULL : parse_expr(p);
+        expect_semi_recover(p, "se esperaba ';' despues de return");
+        return st;
+    }
+    if (match(p, TOK_KW_BREAK)) {
+        Stmt *st = new_stmt(p, STMT_BREAK, prev(p)->span);
+        if (p->loop_depth == 0 && p->switch_depth == 0) diag_report(p->diags, st->span, "'break' solo puede usarse dentro de un bucle/switch");
+        expect_semi_recover(p, "se esperaba ';' despues de break");
+        return st;
+    }
+    if (match(p, TOK_KW_CONTINUE)) {
+        Stmt *st = new_stmt(p, STMT_CONTINUE, prev(p)->span);
+        if (p->loop_depth == 0) diag_report(p->diags, st->span, "'continue' solo puede usarse dentro de un bucle");
+        expect_semi_recover(p, "se esperaba ';' despues de continue");
+        return st;
+    }
+    if (is_type_start(p)) {
+        size_t save = p->pos;
+        TypeRef t = parse_type(p);
+        if (at(p, TOK_IDENTIFIER)) {
+            Token *name = advance(p);
+            if (match(p, TOK_ASSIGN)) {
+                Stmt *st = new_stmt(p, STMT_VAR, name->span);
+                st->as.var.type = t;
+                st->as.var.name = name->lexeme;
+                st->as.var.initializer = parse_expr(p);
+                expect_semi_recover(p, "se esperaba ';'");
+                return st;
+            }
+            if (match(p, TOK_SEMI)) {
+                Stmt *st = new_stmt(p, STMT_VAR, name->span);
+                st->as.var.type = t;
+                st->as.var.name = name->lexeme;
+                st->as.var.initializer = NULL;
+                return st;
+            }
+        }
+        p->pos = save;
+    }
+    Stmt *st = new_stmt(p, STMT_EXPR, peek(p)->span);
+    st->as.expr = parse_expr(p);
+    expect_semi_recover(p, "se esperaba ';' despues de expresion");
+    return st;
+}
+
+static Stmt *parse_switch_stmt(Parser *p, Span s) {
+    expect(p, TOK_LPAREN, "se esperaba '(' en switch");
+    Expr *expr = parse_expr(p);
+    expect(p, TOK_RPAREN, "se esperaba ')'");
+    expect(p, TOK_LBRACE, "se esperaba '{' en switch");
+
+    Vector cases; vector_init(&cases, sizeof(SwitchCase));
+    Stmt *default_body = NULL;
+    p->switch_depth++;
+    while (!at(p, TOK_RBRACE) && !at(p, TOK_EOF)) {
+        if (match(p, TOK_KW_CASE)) {
+            Token *lit = expect(p, TOK_INT_LITERAL, "se esperaba literal entero en case");
+            expect(p, TOK_COLON, "se esperaba ':' despues de case");
+            Vector stmts; vector_init(&stmts, sizeof(Stmt *));
+            while (!at(p, TOK_KW_CASE) && !at(p, TOK_KW_DEFAULT) && !at(p, TOK_RBRACE)) {
+                Stmt *st = parse_stmt(p);
+                vector_push(&stmts, &st);
+            }
+            Stmt *block = new_stmt(p, STMT_BLOCK, lit->span);
+            block->as.block.count = stmts.count;
+            block->as.block.items = aalloc(p, sizeof(Stmt *) * stmts.count);
+            memcpy(block->as.block.items, stmts.data, sizeof(Stmt *) * stmts.count);
+            vector_free(&stmts);
+            SwitchCase c = {.value = atoi(lit->lexeme), .body = block};
+            vector_push(&cases, &c);
+        } else if (match(p, TOK_KW_DEFAULT)) {
+            Token *d = prev(p);
+            expect(p, TOK_COLON, "se esperaba ':' despues de default");
+            Vector stmts; vector_init(&stmts, sizeof(Stmt *));
+            while (!at(p, TOK_KW_CASE) && !at(p, TOK_RBRACE)) {
+                Stmt *st = parse_stmt(p);
+                vector_push(&stmts, &st);
+            }
+            Stmt *block = new_stmt(p, STMT_BLOCK, d->span);
+            block->as.block.count = stmts.count;
+            block->as.block.items = aalloc(p, sizeof(Stmt *) * stmts.count);
+            memcpy(block->as.block.items, stmts.data, sizeof(Stmt *) * stmts.count);
+            vector_free(&stmts);
+            default_body = block;
+        } else {
+            diag_report(p->diags, peek(p)->span, "se esperaba case/default en switch");
+            advance(p);
+        }
+    }
+    p->switch_depth--;
+    expect(p, TOK_RBRACE, "se esperaba '}' en switch");
+
+    Stmt *st = new_stmt(p, STMT_SWITCH, s);
+    st->as.switch_stmt.expr = expr;
+    st->as.switch_stmt.case_count = cases.count;
+    st->as.switch_stmt.cases = aalloc(p, sizeof(SwitchCase) * cases.count);
+    memcpy(st->as.switch_stmt.cases, cases.data, sizeof(SwitchCase) * cases.count);
+    st->as.switch_stmt.default_body = default_body;
+    vector_free(&cases);
+    return st;
+}
+
+Program *parse_program(Arena *arena, Vector *tokens, DiagnosticList *diags) {
+    Parser p = {.arena = arena, .tokens = tokens, .pos = 0, .diags = diags, .loop_depth = 0, .switch_depth = 0};
+    Program *prog = arena_alloc(arena, sizeof(Program));
+    memset(prog, 0, sizeof(Program));
+    Vector classes; vector_init(&classes, sizeof(ClassDecl));
+    Vector interfaces; vector_init(&interfaces, sizeof(InterfaceDecl));
+
+    while ((at(&p, TOK_IDENTIFIER) && strcmp(peek(&p)->lexeme, "global") == 0 && peek_n(&p, 1)->kind == TOK_KW_USING) ||
+           at(&p, TOK_KW_USING)) {
+        if (at(&p, TOK_IDENTIFIER) && strcmp(peek(&p)->lexeme, "global") == 0) {
+            advance(&p);
+        }
+        expect(&p, TOK_KW_USING, "se esperaba using");
+        if (match(&p, TOK_KW_STATIC)) {
+            expect(&p, TOK_IDENTIFIER, "se esperaba tipo en using static");
+            while (match(&p, TOK_DOT)) expect(&p, TOK_IDENTIFIER, "se esperaba segmento de tipo");
+            expect(&p, TOK_SEMI, "se esperaba ';' en using static");
+            continue;
+        }
+        expect(&p, TOK_IDENTIFIER, "se esperaba namespace o alias en using");
+        if (match(&p, TOK_ASSIGN)) {
+            expect(&p, TOK_IDENTIFIER, "se esperaba namespace objetivo en alias using");
+            while (match(&p, TOK_DOT)) expect(&p, TOK_IDENTIFIER, "se esperaba segmento de namespace");
+            expect(&p, TOK_SEMI, "se esperaba ';' en alias using");
+            continue;
+        }
+        while (match(&p, TOK_DOT)) expect(&p, TOK_IDENTIFIER, "se esperaba segmento de namespace");
+        expect(&p, TOK_SEMI, "se esperaba ';' en using");
+    }
+
+    bool in_namespace = false;
+    if (match(&p, TOK_KW_NAMESPACE)) {
+        expect(&p, TOK_IDENTIFIER, "se esperaba nombre de namespace");
+        while (match(&p, TOK_DOT)) expect(&p, TOK_IDENTIFIER, "se esperaba segmento de namespace");
+        expect(&p, TOK_LBRACE, "se esperaba '{' en namespace");
+        in_namespace = true;
+    }
+
+    while (!at(&p, TOK_EOF) && !(in_namespace && at(&p, TOK_RBRACE))) {
+        while (match(&p, TOK_KW_PUBLIC) || match(&p, TOK_KW_PRIVATE)) {}
+        if (match(&p, TOK_KW_INTERFACE)) {
+            Token *iname = expect(&p, TOK_IDENTIFIER, "se esperaba nombre de interface");
+            expect(&p, TOK_LBRACE, "se esperaba '{' en interface");
+            while (!at(&p, TOK_RBRACE) && !at(&p, TOK_EOF)) {
+                TypeRef ret = parse_type(&p);
+                (void)ret;
+                expect(&p, TOK_IDENTIFIER, "se esperaba nombre de metodo en interface");
+                maybe_parse_generic_params(&p);
+                expect(&p, TOK_LPAREN, "se esperaba '(' en firma de interface");
+                if (!at(&p, TOK_RPAREN)) {
+                    do {
+                        TypeRef pt = parse_type(&p);
+                        (void)pt;
+                        expect(&p, TOK_IDENTIFIER, "se esperaba nombre de parametro");
+                    } while (match(&p, TOK_COMMA));
+                }
+                expect(&p, TOK_RPAREN, "se esperaba ')' en firma de interface");
+                expect(&p, TOK_SEMI, "se esperaba ';' en firma de interface");
+            }
+            expect(&p, TOK_RBRACE, "se esperaba '}' de cierre de interface");
+            InterfaceDecl iface = {.name = iname->lexeme, .span = iname->span};
+            vector_push(&interfaces, &iface);
+            continue;
+        }
+        bool is_struct = false;
+        if (match(&p, TOK_KW_CLASS)) {
+            is_struct = false;
+        } else if (match(&p, TOK_KW_STRUCT)) {
+            is_struct = true;
+        } else {
+            expect(&p, TOK_KW_CLASS, "se esperaba 'class' o 'struct' al nivel superior");
+        }
+        Token *cname = expect(&p, TOK_IDENTIFIER, "se esperaba nombre de clase");
+        maybe_parse_generic_params(&p);
+        Vector base_types;
+        vector_init(&base_types, sizeof(const char *));
+        if (match(&p, TOK_COLON)) {
+            Token *base = expect(&p, TOK_IDENTIFIER, "se esperaba tipo base o interface despues de ':'");
+            const char *base_lex = base->lexeme;
+            vector_push(&base_types, &base_lex);
+            while (match(&p, TOK_COMMA)) {
+                Token *next_base = expect(&p, TOK_IDENTIFIER, "se esperaba tipo base o interface despues de ','");
+                const char *next_base_lex = next_base->lexeme;
+                vector_push(&base_types, &next_base_lex);
+            }
+        }
+        expect(&p, TOK_LBRACE, "se esperaba '{' de clase");
+        ClassDecl cls = {.name = cname->lexeme, .is_struct = is_struct, .span = cname->span};
+        Vector methods; vector_init(&methods, sizeof(MethodDecl));
+        Vector fields; vector_init(&fields, sizeof(FieldDecl));
+
+        while (!at(&p, TOK_RBRACE) && !at(&p, TOK_EOF)) {
+            while (match(&p, TOK_KW_PUBLIC) || match(&p, TOK_KW_PRIVATE)) {}
+            bool is_static = match(&p, TOK_KW_STATIC);
+            bool is_async = match(&p, TOK_KW_ASYNC);
+            TypeRef type = parse_type(&p);
+            Token *name = expect(&p, TOK_IDENTIFIER, "se esperaba nombre de miembro");
+            maybe_parse_generic_params(&p);
+            if (match(&p, TOK_LPAREN)) {
+                Vector params; vector_init(&params, sizeof(Param));
+                if (!at(&p, TOK_RPAREN)) {
+                    do {
+                        TypeRef pt = parse_type(&p);
+                        Token *pn = expect(&p, TOK_IDENTIFIER, "se esperaba nombre de parametro");
+                        Param param = {.type = pt, .name = pn->lexeme, .span = pn->span};
+                        vector_push(&params, &param);
+                    } while (match(&p, TOK_COMMA));
+                }
+                expect(&p, TOK_RPAREN, "se esperaba ')' en firma de metodo");
+                Stmt *body = parse_block(&p);
+                MethodDecl m = {.name = name->lexeme, .return_type = type, .body = body, .is_static = is_static, .is_async = is_async, .span = name->span};
+                m.param_count = params.count;
+                m.params = aalloc(&p, sizeof(Param) * params.count);
+                memcpy(m.params, params.data, sizeof(Param) * params.count);
+                vector_push(&methods, &m);
+                vector_free(&params);
+            } else {
+                expect(&p, TOK_SEMI, "se esperaba ';' en campo");
+                FieldDecl f = {.type = type, .name = name->lexeme, .span = name->span};
+                vector_push(&fields, &f);
+            }
+        }
+        expect(&p, TOK_RBRACE, "se esperaba cierre de clase");
+        cls.method_count = methods.count;
+        cls.methods = arena_alloc(arena, sizeof(MethodDecl) * methods.count);
+        memcpy(cls.methods, methods.data, sizeof(MethodDecl) * methods.count);
+        cls.field_count = fields.count;
+        cls.fields = arena_alloc(arena, sizeof(FieldDecl) * fields.count);
+        memcpy(cls.fields, fields.data, sizeof(FieldDecl) * fields.count);
+        cls.base_type_count = base_types.count;
+        cls.base_types = arena_alloc(arena, sizeof(const char *) * base_types.count);
+        memcpy((void *)cls.base_types, base_types.data, sizeof(const char *) * base_types.count);
+        vector_push(&classes, &cls);
+        vector_free(&methods);
+        vector_free(&fields);
+        vector_free(&base_types);
+    }
+
+    prog->interface_count = interfaces.count;
+    prog->interfaces = arena_alloc(arena, sizeof(InterfaceDecl) * interfaces.count);
+    memcpy(prog->interfaces, interfaces.data, sizeof(InterfaceDecl) * interfaces.count);
+    prog->class_count = classes.count;
+    prog->classes = arena_alloc(arena, sizeof(ClassDecl) * classes.count);
+    memcpy(prog->classes, classes.data, sizeof(ClassDecl) * classes.count);
+    vector_free(&interfaces);
+    vector_free(&classes);
+    if (in_namespace) expect(&p, TOK_RBRACE, "se esperaba '}' de cierre de namespace");
+    return prog;
+}

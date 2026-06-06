@@ -1,0 +1,58 @@
+#include "token.h"
+
+const char *token_kind_name(TokenKind kind) {
+    switch (kind) {
+        case TOK_EOF: return "EOF";
+        case TOK_IDENTIFIER: return "identifier";
+        case TOK_INT_LITERAL: return "int_literal";
+        case TOK_STRING_LITERAL: return "string_literal";
+        case TOK_KW_CLASS: return "class";
+        case TOK_KW_STRUCT: return "struct";
+        case TOK_KW_INTERFACE: return "interface";
+        case TOK_KW_USING: return "using";
+        case TOK_KW_NAMESPACE: return "namespace";
+        case TOK_KW_PUBLIC: return "public";
+        case TOK_KW_PRIVATE: return "private";
+        case TOK_KW_STATIC: return "static";
+        case TOK_KW_VOID: return "void";
+        case TOK_KW_INT: return "int";
+        case TOK_KW_BOOL: return "bool";
+        case TOK_KW_STRING: return "string";
+        case TOK_KW_RETURN: return "return";
+        case TOK_KW_IF: return "if";
+        case TOK_KW_ELSE: return "else";
+        case TOK_KW_FOR: return "for";
+        case TOK_KW_FOREACH: return "foreach";
+        case TOK_KW_IN: return "in";
+        case TOK_KW_WHILE: return "while";
+        case TOK_KW_DO: return "do";
+        case TOK_KW_SWITCH: return "switch";
+        case TOK_KW_CASE: return "case";
+        case TOK_KW_DEFAULT: return "default";
+        case TOK_KW_BREAK: return "break";
+        case TOK_KW_CONTINUE: return "continue";
+        case TOK_KW_NEW: return "new";
+        case TOK_KW_ASYNC: return "async";
+        case TOK_KW_AWAIT: return "await";
+        case TOK_KW_TRUE: return "true";
+        case TOK_KW_FALSE: return "false";
+        case TOK_KW_NULL: return "null";
+        case TOK_KW_TRY: return "try";
+        case TOK_KW_CATCH: return "catch";
+        case TOK_KW_FINALLY: return "finally";
+        case TOK_KW_THROW: return "throw";
+        case TOK_COALESCE: return "??";
+        case TOK_QUESTION: return "?";
+        case TOK_PLUS_ASSIGN: return "+=";
+        case TOK_MINUS_ASSIGN: return "-=";
+        case TOK_STAR_ASSIGN: return "*=";
+        case TOK_SLASH_ASSIGN: return "/=";
+        case TOK_PERCENT_ASSIGN: return "%=";
+        case TOK_PLUS_PLUS: return "++";
+        case TOK_MINUS_MINUS: return "--";
+        case TOK_LBRACKET: return "[";
+        case TOK_RBRACKET: return "]";
+        case TOK_COLON: return ":";
+        default: return "symbol";
+    }
+}
